@@ -188,7 +188,6 @@ client.on("messageCreate", async (msg) => {
         } else {
           await clearItem(guildId, args[0]);
           return msg.channel.send(`**${args[0]}** aus dem Bedarf entfernt (alle Typen).`);
-        }
       
       case "help": {
         return msg.channel.send(
