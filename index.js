@@ -1,11 +1,25 @@
-import { Client, GatewayIntentBits, Partials } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} from "discord.js";
 import pkg from "pg";
 const { Pool } = pkg;
 
 // --- ENV ---
-const TOKEN = process.env.TOKEN;               // Discord Bot Token
-const PREFIX = process.env.PREFIX || "!";      // z.B. !
-const DATABASE_URL = process.env.DATABASE_URL; // von Railway Postgres
+const TOKEN = process.env.TOKEN;
+const PREFIX = process.env.PREFIX || "!";
+const DATABASE_URL = process.env.DATABASE_URL;
+const CLIENT_ID = process.env.CLIENT_ID || ""; // optional: für globale Slash-Registrierung
+
 if (!TOKEN || !DATABASE_URL) {
   console.error("Fehlende ENV: TOKEN und/oder DATABASE_URL");
   process.exit(1);
@@ -14,7 +28,6 @@ if (!TOKEN || !DATABASE_URL) {
 // --- DB ---
 const pool = new Pool({ connectionString: DATABASE_URL });
 
-// Tabellen anlegen, falls nicht vorhanden
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
@@ -49,7 +62,6 @@ async function ensureItem(guildId, itemName) {
      ON CONFLICT (guild_id, item_slug) DO UPDATE SET item_name = EXCLUDED.item_name`,
     [guildId, slug, itemName]
   );
-  // 3 Count-Reihen sicherstellen
   for (const t of ["gear","trait","litho"]) {
     await pool.query(
       `INSERT INTO counts (guild_id, item_slug, type, value)
@@ -129,7 +141,6 @@ async function clearItem(guildId, itemName) {
   await pool.query(`DELETE FROM counts WHERE guild_id=$1 AND item_slug=$2`, [guildId, slug]);
   await pool.query(`DELETE FROM items  WHERE guild_id=$1 AND item_slug=$2`, [guildId, slug]);
 }
-
 async function clearAll(guildId) {
   await pool.query(`DELETE FROM counts WHERE guild_id=$1`, [guildId]);
   await pool.query(`DELETE FROM items  WHERE guild_id=$1`, [guildId]);
@@ -141,11 +152,26 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
+// --- Slash-Command Registrierung (/bedarf) ---
+async function registerSlash() {
+  if (!CLIENT_ID) return; // falls du CLIENT_ID nicht gesetzt hast, skippen wir die globale Registrierung
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
+  const commands = [
+    new SlashCommandBuilder()
+      .setName("bedarf")
+      .setDescription("Bedarf anmelden: Item eingeben, dann Typ(en) wählen.")
+      .toJSON()
+  ];
+  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+}
+
 client.once("ready", async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await initDB();
+  try { await registerSlash(); } catch (e) { console.warn("Slash-Register warn:", e.message); }
 });
 
+// --- Prefix-Commands (deine alten !-Befehle) ---
 client.on("messageCreate", async (msg) => {
   if (msg.author.bot || !msg.guild) return;
   if (!msg.content.startsWith(PREFIX)) return;
@@ -157,8 +183,7 @@ client.on("messageCreate", async (msg) => {
     switch (cmd.toLowerCase()) {
       case "bedarf": {
         if (args.length < 2) return msg.reply(`Nutze: \`${PREFIX}bedarf <item> <Grund>\` (Gear|Trait|Litho)`);
-        const item = args[0];
-        const type = args[1];
+        const item = args[0], type = args[1];
         const newVal = await changeCount(guildId, item, type, +1);
         return msg.channel.send(`**${msg.author.username}** hat Bedarf für **${item}** (**${type.toUpperCase()}**) angemeldet.\nGesamtbedarf: **${newVal}**`);
       }
@@ -188,26 +213,11 @@ client.on("messageCreate", async (msg) => {
         } else {
           await clearItem(guildId, args[0]);
           return msg.channel.send(`**${args[0]}** aus dem Bedarf entfernt (alle Typen).`);
-      
+        }
+      }
       case "help": {
         return msg.channel.send(
           "**Verfügbare Befehle:**\n" +
           "`!bedarf <item> <grund>` – Bedarf anmelden (Gear/Trait/Litho)\n" +
           "`!bedarf-remove <item> <grund>` – Bedarf reduzieren\n" +
           "`!bedarf-show [item]` – Bedarf anzeigen\n" +
-          "`!bedarf-set <item> <grund> <zahl>` – Bedarf manuell setzen (Mods)\n" +
-          "`!bedarf-clear [item]` – Bedarf löschen (Mods)\n" +
-        );
-      }
-
-      }
-      default:
-        break;
-    }
-  } catch (err) {
-    console.error(err);
-    return msg.reply("Uff, da ist was schiefgelaufen. Check die Eingabe (Gear/Trait/Litho) oder versuch’s erneut.");
-  }
-});
-
-client.login(TOKEN);
