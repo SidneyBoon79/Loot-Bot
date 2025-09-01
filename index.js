@@ -1,25 +1,11 @@
-import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  ActionRowBuilder,
-  StringSelectMenuBuilder,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-} from "discord.js";
+import { Client, GatewayIntentBits, Partials } from "discord.js";
 import pkg from "pg";
 const { Pool } = pkg;
 
 // --- ENV ---
-const TOKEN = process.env.TOKEN;
-const PREFIX = process.env.PREFIX || "!";
-const DATABASE_URL = process.env.DATABASE_URL;
-const CLIENT_ID = process.env.CLIENT_ID || ""; // optional: für globale Slash-Registrierung
-
+const TOKEN = process.env.TOKEN;               // Discord Bot Token
+const PREFIX = process.env.PREFIX || "!";      // z. B. !
+const DATABASE_URL = process.env.DATABASE_URL; // von Railway Postgres
 if (!TOKEN || !DATABASE_URL) {
   console.error("Fehlende ENV: TOKEN und/oder DATABASE_URL");
   process.exit(1);
@@ -28,6 +14,7 @@ if (!TOKEN || !DATABASE_URL) {
 // --- DB ---
 const pool = new Pool({ connectionString: DATABASE_URL });
 
+// Tabellen anlegen, falls nicht vorhanden
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
@@ -62,6 +49,7 @@ async function ensureItem(guildId, itemName) {
      ON CONFLICT (guild_id, item_slug) DO UPDATE SET item_name = EXCLUDED.item_name`,
     [guildId, slug, itemName]
   );
+  // 3 Count-Reihen sicherstellen
   for (const t of ["gear","trait","litho"]) {
     await pool.query(
       `INSERT INTO counts (guild_id, item_slug, type, value)
@@ -141,6 +129,7 @@ async function clearItem(guildId, itemName) {
   await pool.query(`DELETE FROM counts WHERE guild_id=$1 AND item_slug=$2`, [guildId, slug]);
   await pool.query(`DELETE FROM items  WHERE guild_id=$1 AND item_slug=$2`, [guildId, slug]);
 }
+
 async function clearAll(guildId) {
   await pool.query(`DELETE FROM counts WHERE guild_id=$1`, [guildId]);
   await pool.query(`DELETE FROM items  WHERE guild_id=$1`, [guildId]);
@@ -152,26 +141,11 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// --- Slash-Command Registrierung (/bedarf) ---
-async function registerSlash() {
-  if (!CLIENT_ID) return; // falls du CLIENT_ID nicht gesetzt hast, skippen wir die globale Registrierung
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-  const commands = [
-    new SlashCommandBuilder()
-      .setName("bedarf")
-      .setDescription("Bedarf anmelden: Item eingeben, dann Typ(en) wählen.")
-      .toJSON()
-  ];
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-}
-
 client.once("ready", async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await initDB();
-  try { await registerSlash(); } catch (e) { console.warn("Slash-Register warn:", e.message); }
 });
 
-// --- Prefix-Commands (deine alten !-Befehle) ---
 client.on("messageCreate", async (msg) => {
   if (msg.author.bot || !msg.guild) return;
   if (!msg.content.startsWith(PREFIX)) return;
@@ -183,21 +157,25 @@ client.on("messageCreate", async (msg) => {
     switch (cmd.toLowerCase()) {
       case "bedarf": {
         if (args.length < 2) return msg.reply(`Nutze: \`${PREFIX}bedarf <item> <Grund>\` (Gear|Trait|Litho)`);
-        const item = args[0], type = args[1];
+        const item = args[0];
+        const type = args[1];
         const newVal = await changeCount(guildId, item, type, +1);
         return msg.channel.send(`**${msg.author.username}** hat Bedarf für **${item}** (**${type.toUpperCase()}**) angemeldet.\nGesamtbedarf: **${newVal}**`);
       }
+
       case "bedarf-remove": {
         if (args.length < 2) return msg.reply(`Nutze: \`${PREFIX}bedarf-remove <item> <Grund>\``);
         const item = args[0], type = args[1];
         const newVal = await changeCount(guildId, item, type, -1);
         return msg.channel.send(`**${msg.author.username}** hat **${item}** (**${type.toUpperCase()}**) um 1 reduziert.\nNeuer Gesamtbedarf: **${newVal}**`);
       }
+
       case "bedarf-show": {
         const item = args[0];
         const out = await showCounts(guildId, item);
         return msg.channel.send(out);
       }
+
       case "bedarf-set": {
         if (args.length < 3) return msg.reply(`Nutze: \`${PREFIX}bedarf-set <item> <Grund> <Zahl>\``);
         if (!msg.member.permissions.has("ManageMessages")) return msg.reply("Nur Moderation darf das setzen.");
@@ -205,6 +183,7 @@ client.on("messageCreate", async (msg) => {
         const newVal = await setCount(guildId, item, type, val);
         return msg.channel.send(`**${item}** (**${type.toUpperCase()}**) gesetzt auf **${newVal}**.`);
       }
+
       case "bedarf-clear": {
         if (!msg.member.permissions.has("ManageMessages")) return msg.reply("Nur Moderation darf löschen.");
         if (!args[0]) {
@@ -215,6 +194,7 @@ client.on("messageCreate", async (msg) => {
           return msg.channel.send(`**${args[0]}** aus dem Bedarf entfernt (alle Typen).`);
         }
       }
+
       case "help": {
         return msg.channel.send(
           "**Verfügbare Befehle:**\n" +
@@ -223,73 +203,16 @@ client.on("messageCreate", async (msg) => {
           "`!bedarf-show [item]` – Bedarf anzeigen\n" +
           "`!bedarf-set <item> <grund> <zahl>` – Bedarf manuell setzen (Mods)\n" +
           "`!bedarf-clear [item]` – Bedarf löschen (Mods)\n" +
-          "`/bedarf` – Modal + Auswahl (GUI)"
+          "`!help` – Zeigt diese Übersicht"
         );
       }
-      default: break;
+
+      default:
+        break;
     }
   } catch (err) {
     console.error(err);
     return msg.reply("Uff, da ist was schiefgelaufen. Check die Eingabe (Gear/Trait/Litho) oder versuch’s erneut.");
-  }
-});
-
-// --- Interactions: /bedarf → Modal → Multi-Select ---
-client.on("interactionCreate", async (interaction) => {
-  try {
-    if (interaction.isChatInputCommand() && interaction.commandName === "bedarf") {
-      const modal = new ModalBuilder()
-        .setCustomId("bedarfItemModal")
-        .setTitle("Bedarf anmelden");
-
-      const itemInput = new TextInputBuilder()
-        .setCustomId("itemName")
-        .setLabel("Item-Name")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setPlaceholder("z. B. Schwert");
-
-      modal.addComponents(new ActionRowBuilder().addComponents(itemInput));
-      return interaction.showModal(modal);
-    }
-
-    if (interaction.isModalSubmit() && interaction.customId === "bedarfItemModal") {
-      const item = interaction.fields.getTextInputValue("itemName");
-
-      const select = new StringSelectMenuBuilder()
-        .setCustomId(`bedarfType:${item}`)
-        .setPlaceholder("Wähle mindestens einen Grund")
-        .addOptions(
-          { label: "Gear",  value: "gear"  },
-          { label: "Trait", value: "trait" },
-          { label: "Litho", value: "litho" }
-        )
-        .setMinValues(1)
-        .setMaxValues(3);
-
-      const row = new ActionRowBuilder().addComponents(select);
-      return interaction.reply({ content: `Item: **${item}** – wähle Grund/Gründe:`, components: [row], ephemeral: true });
-    }
-
-    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("bedarfType:")) {
-      const item = interaction.customId.split(":")[1];
-      const guildId = interaction.guildId;
-      const chosen = interaction.values; // array der ausgewählten Typen
-
-      let results = [];
-      for (const t of chosen) {
-        const val = await changeCount(guildId, item, t, +1);
-        results.push(`${t[0].toUpperCase()+t.slice(1)}: **${val}**`);
-      }
-
-      const summary = await showCounts(guildId, item);
-      return interaction.update({ content: `✔️ Bedarf für **${item}** erfasst.\n${results.join(" • ")}\n\n${summary}`, components: [] });
-    }
-  } catch (e) {
-    console.error(e);
-    if (interaction.isRepliable()) {
-      return interaction.reply({ content: "Da ist was schiefgelaufen.", ephemeral: true });
-    }
   }
 });
 
