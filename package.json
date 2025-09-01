@@ -1,0 +1,17 @@
+{
+  "name": "bedarf-bot",
+  "version": "1.0.0",
+  "description": "Einfacher Bedarf-Zaehler fuer Discord (Gear/Trait/Litho), Railway + Postgres",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3",
+    "pg": "^8.12.0"
+  }
+}
