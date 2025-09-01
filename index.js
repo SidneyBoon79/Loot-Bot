@@ -189,6 +189,18 @@ client.on("messageCreate", async (msg) => {
           await clearItem(guildId, args[0]);
           return msg.channel.send(`**${args[0]}** aus dem Bedarf entfernt (alle Typen).`);
         }
+      
+      case "help": {
+        return msg.channel.send(
+          "**Verfügbare Befehle:**\n" +
+          "`!bedarf <item> <grund>` – Bedarf anmelden (Gear/Trait/Litho)\n" +
+          "`!bedarf-remove <item> <grund>` – Bedarf reduzieren\n" +
+          "`!bedarf-show [item]` – Bedarf anzeigen\n" +
+          "`!bedarf-set <item> <grund> <zahl>` – Bedarf manuell setzen (Mods)\n" +
+          "`!bedarf-clear [item]` – Bedarf löschen (Mods)\n" +
+        );
+      }
+
       }
       default:
         break;
