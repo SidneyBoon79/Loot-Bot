@@ -221,3 +221,76 @@ client.on("messageCreate", async (msg) => {
           "`!bedarf <item> <grund>` – Bedarf anmelden (Gear/Trait/Litho)\n" +
           "`!bedarf-remove <item> <grund>` – Bedarf reduzieren\n" +
           "`!bedarf-show [item]` – Bedarf anzeigen\n" +
+          "`!bedarf-set <item> <grund> <zahl>` – Bedarf manuell setzen (Mods)\n" +
+          "`!bedarf-clear [item]` – Bedarf löschen (Mods)\n" +
+          "`/bedarf` – Modal + Auswahl (GUI)"
+        );
+      }
+      default: break;
+    }
+  } catch (err) {
+    console.error(err);
+    return msg.reply("Uff, da ist was schiefgelaufen. Check die Eingabe (Gear/Trait/Litho) oder versuch’s erneut.");
+  }
+});
+
+// --- Interactions: /bedarf → Modal → Multi-Select ---
+client.on("interactionCreate", async (interaction) => {
+  try {
+    if (interaction.isChatInputCommand() && interaction.commandName === "bedarf") {
+      const modal = new ModalBuilder()
+        .setCustomId("bedarfItemModal")
+        .setTitle("Bedarf anmelden");
+
+      const itemInput = new TextInputBuilder()
+        .setCustomId("itemName")
+        .setLabel("Item-Name")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("z. B. Schwert");
+
+      modal.addComponents(new ActionRowBuilder().addComponents(itemInput));
+      return interaction.showModal(modal);
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === "bedarfItemModal") {
+      const item = interaction.fields.getTextInputValue("itemName");
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId(`bedarfType:${item}`)
+        .setPlaceholder("Wähle mindestens einen Grund")
+        .addOptions(
+          { label: "Gear",  value: "gear"  },
+          { label: "Trait", value: "trait" },
+          { label: "Litho", value: "litho" }
+        )
+        .setMinValues(1)
+        .setMaxValues(3);
+
+      const row = new ActionRowBuilder().addComponents(select);
+      return interaction.reply({ content: `Item: **${item}** – wähle Grund/Gründe:`, components: [row], ephemeral: true });
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("bedarfType:")) {
+      const item = interaction.customId.split(":")[1];
+      const guildId = interaction.guildId;
+      const chosen = interaction.values; // array der ausgewählten Typen
+
+      let results = [];
+      for (const t of chosen) {
+        const val = await changeCount(guildId, item, t, +1);
+        results.push(`${t[0].toUpperCase()+t.slice(1)}: **${val}**`);
+      }
+
+      const summary = await showCounts(guildId, item);
+      return interaction.update({ content: `✔️ Bedarf für **${item}** erfasst.\n${results.join(" • ")}\n\n${summary}`, components: [] });
+    }
+  } catch (e) {
+    console.error(e);
+    if (interaction.isRepliable()) {
+      return interaction.reply({ content: "Da ist was schiefgelaufen.", ephemeral: true });
+    }
+  }
+});
+
+client.login(TOKEN);
