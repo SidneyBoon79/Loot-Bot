@@ -1,17 +1,12 @@
-// commands/vote-show.mjs — öffentlicher Überblick (48h), zeigt Roll-Status (🟢/🔴)
-const REASON_LABEL = new Map([
-  ["gear",  "⚔️ Gear"],
-  ["trait", "💠 Trait"],
-  ["litho", "📜 Litho"],
-]);
+// commands/vote-show.mjs — öffentlicher Überblick (48h), mit Gear/Trait/Litho ausgeschrieben + Emojis
 const WEIGHT = { gear: 3, trait: 2, litho: 1 };
+const LABEL  = { gear: "⚔️ Gear", trait: "💠 Trait", litho: "📜 Litho" };
+
 function fmtCount(n){ return new Intl.NumberFormat("de-DE").format(Number(n)||0); }
 
 export async function run(ctx) {
-  // sofort ack’n (kein Timeout), öffentlich
   await ctx.defer({ ephemeral: false });
 
-  // Aggregation + Roll-Status aus items
   const { rows } = await ctx.db.query(
     `SELECT
        v.item_slug,
@@ -49,9 +44,9 @@ export async function run(ctx) {
   const lines = items.map(it => {
     const flag = it.rolled ? "🔴" : "🟢";
     const detail =
-      `${REASON_LABEL.get("gear")} ${fmtCount(it.counts.gear)} · ` +
-      `${REASON_LABEL.get("trait")} ${fmtCount(it.counts.trait)} · ` +
-      `${REASON_LABEL.get("litho")} ${fmtCount(it.counts.litho)}`;
+      `${LABEL.gear} ${fmtCount(it.counts.gear)} · ` +
+      `${LABEL.trait} ${fmtCount(it.counts.trait)} · ` +
+      `${LABEL.litho} ${fmtCount(it.counts.litho)}`;
     return `${flag} **${it.name}** — ${fmtCount(it.total)} Stimmen (${detail})`;
   });
 
