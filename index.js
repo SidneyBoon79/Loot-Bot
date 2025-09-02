@@ -1,4 +1,4 @@
-// index.js — Votes + Roll + Fairness (clean schema; Sort: Grund > Wins(48h) > Roll)
+// index.js — Votes + Roll + Fairness + /vote-info (clean schema; Sort: Grund > Wins(48h) > Roll)
 
 import {
   Client, GatewayIntentBits, Partials,
@@ -140,7 +140,7 @@ function clearWipeTimer(guildId) {
 async function wipeGuildVotes(guildId) {
   await pool.query(`DELETE FROM votes   WHERE guild_id=$1`, [guildId]);
   await pool.query(`DELETE FROM items   WHERE guild_id=$1`, [guildId]);
-  await pool.query(`DELETE FROM winners WHERE guild_id=$1`, [guildId]); // ✅ Wins resetten
+  await pool.query(`DELETE FROM winners WHERE guild_id=$1`, [guildId]); // Wins resetten
   await clearWindow(guildId);
   clearWipeTimer(guildId);
   console.log(`[Auto-Wipe] ${guildId}: Votes + Items + Winners geleert.`);
@@ -356,6 +356,75 @@ async function rollForItem(guild, guildId, itemInput) {
   return { displayItemName: displayName, winner, lines };
 }
 
+/* ===== Tutorial (/vote-info) ===== */
+function getVoteInfoEmbeds() {
+  const e1 = new EmbedBuilder()
+    .setTitle("🔰 Was macht der Bot?")
+    .setDescription(
+      [
+        "Ihr könnt für **Items** abstimmen (mit **einem Grund**) und später lost der Bot das Item fair aus.",
+        "",
+        "**Gründe (Wertigkeit):** ⚔️ Gear > 💠 Trait > 📜 Litho",
+        "_Diese Reihenfolge ist immer wichtiger als die Würfelzahl._",
+        "",
+        "### 48-Stunden-Fenster",
+        "Sobald jemand das erste Mal `/vote` nutzt, startet ein **48h-Fenster**.",
+        "• Alle Votes zählen nur **innerhalb** dieses Fensters.",
+        "• Nach Ablauf wird alles automatisch zurückgesetzt."
+      ].join("\n")
+    );
+
+  const e2 = new EmbedBuilder()
+    .setTitle("🧑‍🤝‍🧑 Befehle für User")
+    .setDescription(
+      [
+        "• **`/vote`** – Item eingeben → **einen Grund** wählen.",
+        "• **`/vote-show`** – Zeigt die aktuellen Votes (optional `item`).",
+        "• **`/vote-remove`** – Löscht **deine** Votes für ein Item.",
+        "",
+        "### Auslosung",
+        "Ein Mod startet `/roll <Item>`. Der Bot würfelt 1–100 und sortiert so:",
+        "1) **Grund** (⚔️ > 💠 > 📜)",
+        "2) **Gewinne im aktuellen 48h-Fenster** (weniger Wins = besser)",
+        "3) **Würfelzahl** (höher ist besser)",
+        "",
+        "**Beispiel**:",
+        "🎲 Würfelrunde für Schwert",
+        "🥇 Max — 40 (⚔️ Gear | 0W)",
+        "🥈 Lisa — 88 (💠 Trait | 1W)",
+        "🏆 Gewinner: Max (⚔️ Gear | 1W)"
+      ].join("\n")
+    );
+
+  const e3 = new EmbedBuilder()
+    .setTitle("❓ FAQ (User)")
+    .setDescription(
+      [
+        "**Ich habe mich verklickt.**  → `/vote-remove` und neu voten.",
+        "**Warum gewinnt jemand mit kleinerer Zahl?**  → Grund & weniger Wins sind wichtiger.",
+        "**Ich sehe keine Votes mehr.**  → Das 48h-Fenster ist abgelaufen."
+      ].join("\n")
+    );
+
+  const e4 = new EmbedBuilder()
+    .setTitle("🛡️ Für Mods")
+    .setDescription(
+      [
+        "• **`/roll <Item>`** – lost aus (zeigt Gewinner **mit neuer Win-Zahl** `| XW`).",
+        "• **`/vote-clear`** – Hard Reset: löscht **Votes, Items und Winners**. Nächstes `/vote` startet neues 48h-Fenster.",
+        "• **`/vote-show [item]`** – Übersicht.",
+        "",
+        "**Best Practices**",
+        "• Genau **ein Grund** pro Vote.",
+        "• Transparenz: vor dem Roll eine `/vote-show` posten.",
+        "",
+
+      ].join("\n")
+    );
+
+  return [e1, e2, e3, e4];
+}
+
 /* ===== Discord Client ===== */
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
@@ -386,6 +455,9 @@ async function registerSlash() {
       .setDescription("Würfelt das Item unter allen Votern aus (Mods)")
       .addStringOption(o => o.setName("item").setDescription("Item-Name").setRequired(true))
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .toJSON(),
+    new SlashCommandBuilder().setName("vote-info")
+      .setDescription("Zeigt das Kurz-Tutorial für User & Mods an.")
       .toJSON()
   ];
 
@@ -492,6 +564,12 @@ client.on("interactionCreate", async (interaction) => {
           .setDescription(`${lines}\n\n🏆 Gewinner: ${winner.displayName} (${reasonEmojiLabel(winner.type)} | ${winner.wins}W)`);
 
         return interaction.reply({ embeds: [embed] });
+      }
+
+      // /vote-info
+      if (interaction.commandName === "vote-info") {
+        const embeds = getVoteInfoEmbeds();
+        return interaction.reply({ embeds, ephemeral: false });
       }
     }
 
