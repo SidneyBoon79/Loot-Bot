@@ -1,157 +1,79 @@
-
-// commands/vote-show.mjs
-// /vote-show – zeigt aktuelle Votes im 48h-Fenster
-// Optional: item:<Name> → nur dieses Item
+// commands/vote-show.mjs — öffentlicher Überblick (48h), Timeout-safe via defer()
 //
-// Anzeige-Logik:
-// - Zählt nur Votes der letzten 48 Stunden (created_at > now()-interval '48 hours')
-// - Zeigt pro Item: Gear / Trait / Litho + Status (🟡 offen / ✅ gerollt)
-// - Ohne Item-Filter: alphabetisch nach Itemname
-//
-// Hinweis: Standardmäßig NICHT ephemer (damit alle die Übersicht sehen).
-// Wenn du es privat willst, setze unten bei ctx.reply({ ... }, {ephemeral:true}).
+// Nutzt dein Schema:
+// votes: (guild_id, item_slug, type, item_name_first, created_at, …)
 
-function normalizeItem(raw) {
-  return (raw ?? "").trim().slice(0, 200);
-}
+const REASON_LABEL = new Map([
+  ["gear",  "⚔️ Gear"],
+  ["trait", "💠 Trait"],
+  ["litho", "📜 Litho"],
+]);
 
-function indexByName(options = []) {
-  const map = Object.create(null);
-  for (const o of options) map[o.name] = o;
-  return map;
-}
+const WEIGHT = { gear: 3, trait: 2, litho: 1 };
+
+function fmtCount(n){ return new Intl.NumberFormat("de-DE").format(Number(n)||0); }
 
 export async function run(ctx) {
-  const opt = indexByName(ctx.options);
-  const itemRaw = opt.item?.value;
-  const itemFilter = itemRaw ? normalizeItem(itemRaw) : null;
+  // sofort ack’n (kein Timeout), öffentlich
+  await ctx.defer({ ephemeral: false });
 
-  await ensureSchema(ctx.db);
+  // Votes der letzten 48h je Item aggregieren
+  const { rows } = await ctx.db.query(
+    `SELECT
+       v.item_slug,
+       MAX(v.item_name_first) AS item_name_first,
+       SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END) AS c_gear,
+       SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END) AS c_trait,
+       SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END) AS c_litho,
+       COUNT(*) AS c_total,
+       MIN(v.created_at) AS first_vote_at,
+       MAX(v.created_at) AS last_vote_at
+     FROM votes v
+     WHERE v.guild_id = $1
+       AND v.created_at >= NOW() - INTERVAL '48 hours'
+     GROUP BY v.item_slug`,
+    [ctx.guildId]
+  );
 
-  if (itemFilter) {
-    // Einzelnes Item
-    const q = `
-      WITH windowed AS (
-        SELECT *
-          FROM votes
-         WHERE guild_id = $1
-           AND item_name = $2
-           AND created_at > NOW() - INTERVAL '48 hours'
-      )
-      SELECT
-        i.item_name,
-        COALESCE(i.rolled, FALSE) AS rolled,
-        (SELECT COUNT(*)::int FROM windowed WHERE reason='gear')  AS gear,
-        (SELECT COUNT(*)::int FROM windowed WHERE reason='trait') AS trait,
-        (SELECT COUNT(*)::int FROM windowed WHERE reason='litho') AS litho
-      FROM items i
-      WHERE i.guild_id = $1 AND i.item_name = $2
-      LIMIT 1;
-    `;
-    const { rows } = await ctx.db.query(q, [ctx.guildId, itemFilter]);
-
-    if (rows.length === 0) {
-      // Falls Item in items nicht existiert, checken wir ob es wenigstens Votes gab
-      const { rows: v } = await ctx.db.query(
-        `SELECT COUNT(*)::int AS c
-           FROM votes
-          WHERE guild_id=$1 AND item_name=$2
-            AND created_at > NOW() - INTERVAL '48 hours'`,
-        [ctx.guildId, itemFilter]
-      );
-      if ((v[0]?.c ?? 0) === 0) {
-        return ctx.reply(`**${itemFilter}** hat aktuell keine Votes im 48h-Fenster.`, { ephemeral: false });
-      }
-      // Es gab Votes, aber Item wurde evtl. entfernt – einfache Fallback-Ausgabe:
-      const { rows: agg } = await ctx.db.query(
-        `
-        SELECT
-          SUM(CASE WHEN reason='gear'  THEN 1 ELSE 0 END)::int  AS gear,
-          SUM(CASE WHEN reason='trait' THEN 1 ELSE 0 END)::int  AS trait,
-          SUM(CASE WHEN reason='litho' THEN 1 ELSE 0 END)::int  AS litho
-        FROM votes
-        WHERE guild_id=$1 AND item_name=$2
-          AND created_at > NOW() - INTERVAL '48 hours'
-        `,
-        [ctx.guildId, itemFilter]
-      );
-      const a = agg[0] || { gear: 0, trait: 0, litho: 0 };
-      return ctx.reply(
-        `**${itemFilter}** (🟡)\n• Gear: **${a.gear}**\n• Trait: **${a.trait}**\n• Litho: **${a.litho}**`,
-        { ephemeral: false }
-      );
-    }
-
-    const r = rows[0];
-    const flag = r.rolled ? "✅" : "🟡";
-    const msg =
-      `**${r.item_name}** ${flag}\n` +
-      `• Gear: **${r.gear}**\n` +
-      `• Trait: **${r.trait}**\n` +
-      `• Litho: **${r.litho}**`;
-
-    return ctx.reply(msg, { ephemeral: false });
+  if (!rows.length) {
+    return ctx.followUp("Keine gültigen Votes im 48h-Fenster. ✨", { ephemeral: false });
   }
 
-  // Übersicht aller Items
-  const qAll = `
-    WITH windowed AS (
-      SELECT *
-        FROM votes
-       WHERE guild_id = $1
-         AND created_at > NOW() - INTERVAL '48 hours'
-    )
-    SELECT
-      i.item_name,
-      COALESCE(i.rolled, FALSE) AS rolled,
-      COALESCE(SUM(CASE WHEN w.reason='gear'  THEN 1 ELSE 0 END),0)::int  AS gear,
-      COALESCE(SUM(CASE WHEN w.reason='trait' THEN 1 ELSE 0 END),0)::int  AS trait,
-      COALESCE(SUM(CASE WHEN w.reason='litho' THEN 1 ELSE 0 END),0)::int  AS litho
-    FROM items i
-    LEFT JOIN windowed w
-      ON w.guild_id = i.guild_id AND w.item_name = i.item_name
-    WHERE i.guild_id = $1
-    GROUP BY i.item_name, i.rolled
-    ORDER BY i.item_name ASC;
-  `;
-  const { rows: items } = await ctx.db.query(qAll, [ctx.guildId]);
+  // Sortierung: stärkstes Top-Reason (⚔️>💠>📜) desc → total desc → Name asc
+  const items = rows.map(r => {
+    const counts = { gear: Number(r.c_gear)||0, trait: Number(r.c_trait)||0, litho: Number(r.c_litho)||0 };
+    const top = (["gear","trait","litho"]).sort((a,b) => (counts[b]-counts[a]) || (WEIGHT[b]-WEIGHT[a]))[0];
+    return {
+      name: r.item_name_first,
+      slug: r.item_slug,
+      counts,
+      total: Number(r.c_total)||0,
+      top,
+      first: new Date(r.first_vote_at),
+      last:  new Date(r.last_vote_at)
+    };
+  }).sort((a,b) => {
+    const w = WEIGHT[a.top] - WEIGHT[b.top];
+    if (w !== 0) return -(w);
+    if (a.total !== b.total) return b.total - a.total;
+    return (a.name||"").localeCompare(b.name||"", "de");
+  });
 
-  if (items.length === 0) {
-    return ctx.reply("Aktuell gibt’s keine Votes im 48h-Fenster.", { ephemeral: false });
-  }
+  const now = Date.now();
+  const soonMs = 36 * 60 * 60 * 1000; // 🟡 wenn älter als 36h (läuft bald aus)
+  const lines = items.map(it => {
+    const ageMs = now - it.first.getTime();
+    const flag = ageMs >= soonMs ? "🟡" : "✅";
+    const detail =
+      `${REASON_LABEL.get("gear")} ${fmtCount(it.counts.gear)} · ` +
+      `${REASON_LABEL.get("trait")} ${fmtCount(it.counts.trait)} · ` +
+      `${REASON_LABEL.get("litho")} ${fmtCount(it.counts.litho)}`;
+    return `${flag} **${it.name}** — ${fmtCount(it.total)} Stimmen (${detail})`;
+  });
 
-  const lines = items.map(r => {
-    const flag = r.rolled ? "✅" : "🟡";
-    return `**${r.item_name}** ${flag}\n• Gear: **${r.gear}**\n• Trait: **${r.trait}**\n• Litho: **${r.litho}**`;
-  }).join("\n\n");
+  const header = `**Votes der letzten 48h (${fmtCount(items.length)} Items):**\n` +
+                 `✅ frisch · 🟡 läuft bald aus`;
+  const body = header + `\n\n` + lines.join("\n");
 
-  return ctx.reply(lines, { ephemeral: false });
-}
-
-async function ensureSchema(db) {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS votes (
-      id         BIGSERIAL PRIMARY KEY,
-      guild_id   TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      item_name  TEXT NOT NULL,
-      reason     TEXT NOT NULL CHECK (reason IN ('gear','trait','litho')),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (guild_id, user_id, item_name)
-    );
-  `);
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS items (
-      id         BIGSERIAL PRIMARY KEY,
-      guild_id   TEXT NOT NULL,
-      item_name  TEXT NOT NULL,
-      rolled     BOOLEAN NOT NULL DEFAULT FALSE,
-      winner_id  TEXT,
-      rolled_by  TEXT,
-      rolled_at  TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (guild_id, item_name)
-    );
-  `);
+  return ctx.followUp(body, { ephemeral: false });
 }
