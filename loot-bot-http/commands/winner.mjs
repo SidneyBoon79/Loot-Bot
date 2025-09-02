@@ -1,77 +1,34 @@
-// commands/winner.mjs
-// /winner – zeigt eine kompakte Gewinnerliste (Mods only), 48h-Fenster
-// Ausgabe (ephemer an den Mod):
-// Item — @User (Wins gesamt: n) | gerollt: YYYY-MM-DD HH:MM
+// commands/winner.mjs — Gewinnerliste der letzten 48h (alphabetisch)
+// Zeigt nur: User — Item (ohne Ranking, ohne Wurfzahlen)
 
 export async function run(ctx) {
   ctx.requireMod?.();
-  await ensureSchema(ctx.db);
+  await ctx.defer({ ephemeral: false });
 
-  const guildId = ctx.guildId;
-
-  // Gewinner der letzten 48h: nur Items, die gerollt wurden und einen winner_id haben
   const { rows } = await ctx.db.query(
-    `
-    SELECT
-      i.item_name,
-      i.winner_id,
-      i.rolled_at,
-      COALESCE(w.win_count, 0) AS win_count
-    FROM items i
-    LEFT JOIN wins w
-      ON w.guild_id = i.guild_id AND w.user_id = i.winner_id
-    WHERE i.guild_id = $1
-      AND i.rolled = TRUE
-      AND i.winner_id IS NOT NULL
-      AND i.rolled_at > NOW() - INTERVAL '48 hours'
-    ORDER BY i.rolled_at DESC, i.item_name ASC
-    `,
-    [guildId]
+    `SELECT w.user_id,
+            i.item_name_first AS item_name,
+            w.updated_at
+       FROM items i
+       JOIN wins w
+         ON w.guild_id = i.guild_id
+        AND w.user_id  = i.rolled_by
+      WHERE i.guild_id = $1
+        AND i.rolled_at >= NOW() - INTERVAL '48 hours'
+      ORDER BY w.user_id ASC, i.item_name_first ASC`,
+    [ctx.guildId]
   );
 
   if (!rows.length) {
-    return ctx.reply("Keine Gewinner im aktuellen 48h-Fenster.", { ephemeral: true });
+    return ctx.followUp("Keine Gewinner in den letzten 48h. ✨", { ephemeral: false });
   }
 
-  const fmt = (d) => {
-    // Einfache UTC→„YYYY-MM-DD HH:MM“ Darstellung; Discord zeigt die Zeit im Client eh lokalisiert an.
-    const dt = new Date(d);
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())} ${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())} UTC`;
-    // Wenn du lieber lokale Zeitzone willst, nimm dt.getFullYear() etc.
-  };
-
+  // Baue Zeilen
   const lines = rows.map(r => {
-    const mention = `<@${r.winner_id}>`;
-    return `${r.item_name} — ${mention} (Wins gesamt: ${r.win_count}) | gerollt: ${fmt(r.rolled_at)}`;
-  }).join("\n");
+    return `<@${r.user_id}>   —   ${r.item_name}`;
+  });
 
-  return ctx.reply(lines, { ephemeral: true });
+  const body = `**Gewinner der letzten 48h:**\n` + lines.join("\n");
+
+  return ctx.followUp(body, { ephemeral: false });
 }
-
-async function ensureSchema(db) {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS items (
-      id         BIGSERIAL PRIMARY KEY,
-      guild_id   TEXT NOT NULL,
-      item_name  TEXT NOT NULL,
-      rolled     BOOLEAN NOT NULL DEFAULT FALSE,
-      winner_id  TEXT,
-      rolled_by  TEXT,
-      rolled_at  TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (guild_id, item_name)
-    );
-  `);
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS wins (
-      guild_id   TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      win_count  INTEGER NOT NULL DEFAULT 0,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (guild_id, user_id)
-    );
-  `);
-}
-
