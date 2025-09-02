@@ -1,4 +1,4 @@
-// index.js — canonical names (erste Schreibweise), exact-one reason, 48h window
+// index.js — canonical names (erste Schreibweise), exact-one reason, 48h window, prune items
 import {
   Client, GatewayIntentBits, Partials,
   REST, Routes, SlashCommandBuilder,
@@ -88,9 +88,11 @@ async function clearWindow(guildId) {
 }
 
 async function wipeGuildVotes(guildId) {
+  // alles weg: erst Votes, dann Items
   await pool.query(`DELETE FROM votes WHERE guild_id=$1`, [guildId]);
+  await pool.query(`DELETE FROM items WHERE guild_id=$1`, [guildId]);
   await clearWindow(guildId);
-  console.log(`[Auto-Wipe] ${guildId}: Liste geleert.`);
+  console.log(`[Auto-Wipe] ${guildId}: Votes + Items geleert.`);
 }
 
 function clearWipeTimer(guildId) {
@@ -147,6 +149,19 @@ async function ensureCanonicalItem(guildId, inputName) {
   return { slug, displayName };
 }
 
+/* ===== Helfer: leere Items löschen ===== */
+async function pruneEmptyItems(guildId) {
+  await pool.query(`
+    DELETE FROM items i
+    WHERE i.guild_id = $1
+      AND NOT EXISTS (
+        SELECT 1 FROM votes v
+        WHERE v.guild_id = i.guild_id
+          AND v.item_slug = i.item_slug
+      )
+  `, [guildId]);
+}
+
 /* ===== Votes ===== */
 async function addVoteIfNew(guildId, itemNameInput, type, userId) {
   const t = String(type || "").toLowerCase();
@@ -175,6 +190,8 @@ async function removeUserVotes(guildId, itemNameInput, userId) {
     `DELETE FROM votes WHERE guild_id=$1 AND item_slug=$2 AND user_id=$3`,
     [guildId, slug, userId]
   );
+  // falls Item dadurch leer wurde → aus items entfernen
+  await pruneEmptyItems(guildId);
   return res.rowCount;
 }
 
@@ -307,7 +324,7 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: out, ephemeral: false });
       }
 
-      // /vote-clear -> Mods löschen alles
+      // /vote-clear -> Mods löschen alles (inkl. Items)
       if (interaction.commandName === "vote-clear") {
         const perms = interaction.memberPermissions;
         if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
@@ -318,7 +335,7 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.", ephemeral: false });
       }
 
-      // /vote-remove -> eigene Votes für ein Item löschen
+      // /vote-remove -> eigene Votes für ein Item löschen (+Prune)
       if (interaction.commandName === "vote-remove") {
         const item = interaction.options.getString("item", true);
         const removed = await removeUserVotes(guildId, item, interaction.user.id);
