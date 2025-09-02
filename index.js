@@ -27,18 +27,31 @@ const guildTimers = new Map(); // guildId -> Timeout
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 async function initDB() {
+  // Stimmen
   await pool.query(`
     CREATE TABLE IF NOT EXISTS votes (
       id SERIAL PRIMARY KEY,
       guild_id   TEXT NOT NULL,
       item_slug  TEXT NOT NULL,
-      item_name  TEXT NOT NULL,
+      item_name  TEXT NOT NULL,       -- gespeicherter KANONISCHER Name
       type       TEXT NOT NULL CHECK (type IN ('gear','trait','litho')),
       user_id    TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (guild_id, item_slug, type, user_id)
     );
   `);
+
+  // Kanonischer, erste Schreibweise je (guild,item_slug)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS items (
+      guild_id TEXT NOT NULL,
+      item_slug TEXT NOT NULL,
+      item_name_first TEXT NOT NULL,
+      PRIMARY KEY (guild_id, item_slug)
+    );
+  `);
+
+  // Fenster-Ende
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       guild_id TEXT PRIMARY KEY,
@@ -115,17 +128,41 @@ async function windowStillActive(guildId) {
   return !!end && end.getTime() > Date.now();
 }
 
+/* ===== Items / Kanonischer Name ===== */
+// Sicherstellt, dass der erste Name festgeschrieben wird.
+// Gibt { slug, displayName } zurück (displayName = erste Schreibweise).
+async function ensureCanonicalItem(guildId, inputName) {
+  const slug = slugify(inputName);
+
+  // Ersten Namen nur anlegen, falls noch nicht vorhanden
+  await pool.query(
+    `INSERT INTO items (guild_id, item_slug, item_name_first)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (guild_id, item_slug) DO NOTHING`,
+    [guildId, slug, inputName]
+  );
+
+  // Kanonischen Namen lesen
+  const { rows } = await pool.query(
+    `SELECT item_name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
+    [guildId, slug]
+  );
+  const displayName = rows[0]?.item_name_first || inputName;
+  return { slug, displayName };
+}
+
 /* ===== Votes ===== */
-async function addVoteIfNew(guildId, itemName, type, userId) {
+async function addVoteIfNew(guildId, itemNameInput, type, userId) {
   const t = type.toLowerCase();
   if (!["gear","trait","litho"].includes(t)) throw new Error("Ungültiger Grund");
-  const slug = slugify(itemName);
+
+  const { slug, displayName } = await ensureCanonicalItem(guildId, itemNameInput);
 
   const res = await pool.query(
     `INSERT INTO votes (guild_id, item_slug, item_name, type, user_id)
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (guild_id, item_slug, type, user_id) DO NOTHING`,
-    [guildId, slug, itemName, t, userId]
+    [guildId, slug, displayName, t, userId]
   );
   const isNew = res.rowCount === 1;
 
@@ -134,11 +171,11 @@ async function addVoteIfNew(guildId, itemName, type, userId) {
      FROM votes WHERE guild_id=$1 AND item_slug=$2 AND type=$3`,
     [guildId, slug, t]
   );
-  return { isNew, value: rows[0].total };
+  return { isNew, value: rows[0].total, displayName };
 }
 
-async function removeUserVotes(guildId, itemName, userId) {
-  const slug = slugify(itemName);
+async function removeUserVotes(guildId, itemNameInput, userId) {
+  const { slug } = await ensureCanonicalItem(guildId, itemNameInput);
   const res = await pool.query(
     `DELETE FROM votes WHERE guild_id=$1 AND item_slug=$2 AND user_id=$3`,
     [guildId, slug, userId]
@@ -146,32 +183,38 @@ async function removeUserVotes(guildId, itemName, userId) {
   return res.rowCount;
 }
 
-async function showVotes(guildId, itemName) {
-  if (itemName) {
-    const slug = slugify(itemName);
+async function showVotes(guildId, itemNameInput) {
+  if (itemNameInput) {
+    const { slug } = await ensureCanonicalItem(guildId, itemNameInput);
+    // Kanonischen Namen aus items holen + aggregieren
     const { rows } = await pool.query(
-      `SELECT item_name,
-              SUM(CASE WHEN type='gear'  THEN 1 ELSE 0 END)::int  AS gear,
-              SUM(CASE WHEN type='trait' THEN 1 ELSE 0 END)::int  AS trait,
-              SUM(CASE WHEN type='litho' THEN 1 ELSE 0 END)::int  AS litho
-       FROM votes
-       WHERE guild_id=$1 AND item_slug=$2
-       GROUP BY item_name`,
+      `SELECT i.item_name_first AS item_name,
+              SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END)::int  AS gear,
+              SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END)::int  AS trait,
+              SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END)::int  AS litho
+       FROM items i
+       LEFT JOIN votes v
+         ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
+       WHERE i.guild_id=$1 AND i.item_slug=$2
+       GROUP BY i.item_name_first`,
       [guildId, slug]
     );
-    if (rows.length === 0) return `**${itemName}** hat aktuell keine Votes.`;
+    if (rows.length === 0) return `**${itemNameInput}** hat aktuell keine Votes.`;
     const r = rows[0];
     return `**${r.item_name}**\n• Gear: **${r.gear}**\n• Trait: **${r.trait}**\n• Litho: **${r.litho}**`;
   } else {
+    // Gesamtliste: immer über items joinen, damit es keine Doppel-Anzeige durch Cases gibt
     const { rows } = await pool.query(
-      `SELECT item_name,
-              SUM(CASE WHEN type='gear'  THEN 1 ELSE 0 END)::int  AS gear,
-              SUM(CASE WHEN type='trait' THEN 1 ELSE 0 END)::int  AS trait,
-              SUM(CASE WHEN type='litho' THEN 1 ELSE 0 END)::int  AS litho
-       FROM votes
-       WHERE guild_id=$1
-       GROUP BY item_name
-       ORDER BY item_name`,
+      `SELECT i.item_name_first AS item_name,
+              COALESCE(SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END),0)::int  AS gear,
+              COALESCE(SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END),0)::int  AS trait,
+              COALESCE(SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END),0)::int  AS litho
+       FROM items i
+       LEFT JOIN votes v
+         ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
+       WHERE i.guild_id=$1
+       GROUP BY i.item_name_first
+       ORDER BY i.item_name_first`,
       [guildId]
     );
     if (rows.length === 0) return "Aktuell gibt’s keine Votes.";
@@ -293,7 +336,7 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    // Modal: Item eingegeben -> Auswahlmenü (jetzt GENAU EIN Grund)
+    // Modal: Item eingegeben -> Auswahlmenü (GENAU EIN Grund)
     if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
       const item = interaction.fields.getTextInputValue("itemName");
       const guildId = interaction.guildId;
@@ -308,7 +351,7 @@ client.on("interactionCreate", async (interaction) => {
           { label: "Trait", value: "trait" },
           { label: "Litho", value: "litho" }
         )
-        .setMinValues(1).setMaxValues(1); // <<< Änderung: maximal 1 Grund
+        .setMinValues(1).setMaxValues(1);
 
       const row = new ActionRowBuilder().addComponents(select);
       return interaction.reply({
@@ -320,24 +363,24 @@ client.on("interactionCreate", async (interaction) => {
 
     // Auswahl geklickt -> Vote speichern
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
-      const item = interaction.customId.split(":")[1];
+      const itemInput = interaction.customId.split(":")[1];
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
 
+      // Falls das Fenster abgelaufen ist → wipen & abbrechen
       if (!(await windowStillActive(guildId))) {
         clearWipeTimer(guildId);
         await wipeGuildVotes(guildId);
         return interaction.update({ content: "⏱️ Das 48h-Fenster ist vorbei. Starte mit einem neuen `/vote` neu.", components: [] });
       }
 
-      // Da max 1 Wert gewählt werden kann, nehmen wir values[0]
-      const chosen = interaction.values[0];
-      const { isNew, value } = await addVoteIfNew(guildId, item, chosen, userId);
+      const chosen = interaction.values[0]; // max 1
+      const { isNew, value, displayName } = await addVoteIfNew(guildId, itemInput, chosen, userId);
       const line = isNew
         ? `✔️ **${chosen.toUpperCase()}** gezählt → **${value}**`
         : `⚠️ **${chosen.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`;
 
-      const summary = await showVotes(guildId, item);
+      const summary = await showVotes(guildId, displayName);
       return interaction.update({ content: `${line}\n\n${summary}`, components: [] });
     }
   } catch (e) {
