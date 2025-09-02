@@ -121,11 +121,55 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
         case "vote-clear":  return cmdVoteClear.run(ctx);
         case "vote-info":   return cmdVoteInfo.run(ctx);
 
-        case "roll":       return cmdRoll.run(ctx);
+        case "roll": {
+          // SHOW DROPDOWN, wenn kein Item direkt angegeben ist
+          const opt = indexByName(ctx.options);
+          const passedItem = opt.item?.value?.trim();
+          if (!passedItem) {
+            ctx.requireMod?.();
+
+            // Items mit gültigen Votes (48h), noch nicht gerollt
+            const { rows: items } = await ctx.db.query(
+              `SELECT i.item_slug,
+                      MAX(i.item_name_first) AS item_name_first,
+                      BOOL_OR(i.rolled_at IS NOT NULL OR COALESCE(i.rolled_manual,false)) AS rolled,
+                      COUNT(v.*) FILTER (WHERE v.created_at >= NOW() - INTERVAL '48 hours') AS c_votes
+                 FROM items i
+                 LEFT JOIN votes v
+                        ON v.guild_id = i.guild_id
+                       AND v.item_slug = i.item_slug
+                WHERE i.guild_id = $1
+                GROUP BY i.item_slug
+                HAVING COUNT(v.*) FILTER (WHERE v.created_at >= NOW() - INTERVAL '48 hours') > 0
+                ORDER BY item_name_first ASC
+                LIMIT 25`,
+              [ctx.guildId]
+            );
+
+            if (!items.length) {
+              return ctx.reply("Keine **offenen Items mit Votes** im 48h-Fenster gefunden. ✅", { ephemeral: true });
+            }
+
+            const optionsArr = items.map(r => ({
+              label: `${r.item_name_first}`,
+              value: r.item_slug,
+              description: `${r.rolled ? "🔴 bereits gerollt" : "🟢 nicht gerollt"} · ${r.c_votes} Votes`
+            }));
+
+            return ctx.reply(
+              { content: "Wähle ein Item für den manuellen Roll:", components: [asStringSelect("Item auswählen …", "roll:select", optionsArr)] },
+              { ephemeral: true }
+            );
+          }
+
+          // Falls irgendwann /roll item:<slug> kommt, hierhin:
+          return cmdRoll.run(ctx);
+        }
+
         case "roll-all":   return cmdRollAll.run(ctx);
         case "winner":     return cmdWinner.run(ctx);
+        case "reducew":    return cmdReduceW.run(ctx); // Dropdown + Modal
 
-        case "reducew":    return cmdReduceW.run(ctx); // USER_SELECT + Modal
         default:
           if (!implemented.has(name)) return ctx.reply(`\`/${name}\` ist noch nicht migriert – kommt gleich.`, { ephemeral: true });
           return ctx.reply("Unbekannter Command.", { ephemeral: true });
@@ -167,12 +211,12 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
         return;
       }
 
-      // /reducew – USER_SELECT -> Modal
+      // /reducew – USER_PICK (String-Select oder User-Select je nach Variante)
       if (customId === "reducew:userpick") {
         ctx.requireMod?.();
         const selectedUser = i.data?.values?.[0];
 
-        // aktuellen Win-Count holen (nur für Anzeige im Modal-Titel)
+        // aktuellen Win-Count für Modal-Titel
         const cur = await ctx.db.query(
           `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
           [ctx.guildId, selectedUser]
