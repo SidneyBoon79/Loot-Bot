@@ -1,13 +1,18 @@
-// commands/reducew.mjs — Mod-Only: Nur Gewinner (win_count > 0) auswählbar, mit Namens-Cache
+// commands/reducew.mjs — Winners-only Dropdown (keine Serverliste), Name-Cache mit Fallback, Modal zum Reduzieren
 
 function fmt(n) {
   return new Intl.NumberFormat("de-DE").format(Number(n) || 0);
 }
 
+/**
+ * /reducew
+ * Zeigt NUR User aus wins (win_count > 0).
+ * Label = gecachter Name aus members.display_name, sonst ID-Fallback.
+ * Keine REST-Lookups, serverless-safe.
+ */
 export async function run(ctx) {
   ctx.requireMod?.();
 
-  // Gewinner + evtl. gecachter Anzeigename
   const { rows } = await ctx.db.query(
     `SELECT w.user_id,
             w.win_count,
@@ -25,11 +30,10 @@ export async function run(ctx) {
 
   if (!rows.length) {
     return ctx.reply("Keine User mit Wins vorhanden. ✅", { ephemeral: true });
-    }
+  }
 
   const options = rows.map(r => ({
-    // Hinweis: echte Mentions werden in Select-Labels nicht gerendert.
-    // Wir zeigen daher Klartext-Name aus Cache + W-Stand.
+    // Discord rendert im Select keine Mentions → Klartext-Name aus Cache oder ID
     label: `${r.display_name} · W${fmt(r.win_count)}`,
     value: String(r.user_id),
     description: `aktueller Stand: W${fmt(r.win_count)}`
@@ -58,6 +62,7 @@ export async function run(ctx) {
   );
 }
 
+/** Baut das Modal; currentWins nur zur Info im Titel. */
 export function makeModal(userId, currentWins = null) {
   const hint = currentWins == null ? "" : ` (aktuell: W${fmt(currentWins)})`;
   return {
@@ -94,6 +99,34 @@ export function makeModal(userId, currentWins = null) {
   };
 }
 
+/**
+ * Wird vom server.mjs bei Auswahl im Select aufgerufen:
+ * Öffnet das Modal mit dem aktuellen Stand (falls vorhanden).
+ */
+export async function handleSelect(ctx) {
+  ctx.requireMod?.();
+
+  const pickedUserId = ctx.interaction?.data?.values?.[0];
+  if (!pickedUserId) {
+    return ctx.reply("❌ Kein User ausgewählt.", { ephemeral: true });
+  }
+
+  const cur = await ctx.db.query(
+    `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
+    [ctx.guildId, pickedUserId]
+  );
+  const currentWins = cur.rows[0]?.win_count ?? 0;
+
+  if (currentWins <= 0) {
+    return ctx.reply(`❌ <@${pickedUserId}> hat keine Wins.`, { ephemeral: true });
+  }
+
+  const modal = makeModal(pickedUserId, currentWins);
+  // Roh-Modal zurückgeben (server.mjs leitet 1:1 weiter)
+  return ctx.reply({ type: 9, data: modal });
+}
+
+/** Modal-Submit: reduziert Wins (niemals unter 0). */
 export async function handleModalSubmit(ctx) {
   const comps = ctx.interaction?.data?.components ?? [];
   const userComp  = comps[0]?.components?.[0];
