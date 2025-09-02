@@ -1,8 +1,5 @@
-// index.js — Votes + Roll (manuell/auto) + Fairness + /vote-info (erweitert) + /reducew + /roll-all + /winner
-// Sortierung beim Roll: Grund > Wins(48h) > Roll
-// Manuelle Rares via /roll <Item> → Item wird geflaggt (rolled_at/by/manual)
-// Alles andere via /roll-all → random gezogen, Items werden geflaggt
-// /winner gibt eine schlichte Liste (Item — User) für Mods zurück (ephemeral)
+// index.js — Votes + 48h-Fenster + Fairness + /roll (Dropdown) + /roll-all + /winner + /reducew + /vote-info
+// Sortierung beim Roll: Grund (⚔️>💠>📜) > Wins(48h, asc) > Roll(desc)
 
 import {
   Client, GatewayIntentBits, Partials,
@@ -19,8 +16,8 @@ const TOKEN = process.env.TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 const CLIENT_ID = process.env.CLIENT_ID || "";
 const GUILD_ID = process.env.GUILD_ID || "";
-if (!TOKEN || !DATABASE_URL) {
-  console.error("Fehlende ENV: TOKEN und/oder DATABASE_URL");
+if (!TOKEN || !DATABASE_URL || !CLIENT_ID) {
+  console.error("Fehlende ENV: TOKEN, DATABASE_URL oder CLIENT_ID");
   process.exit(1);
 }
 
@@ -65,7 +62,7 @@ async function initDB() {
   await pool.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS rolled_manual BOOLEAN NOT NULL DEFAULT FALSE;`);
   await pool.query(`UPDATE items SET item_name_first = item_slug WHERE item_name_first IS NULL;`);
 
-  // Settings
+  // Settings (48h-Fenster)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       guild_id TEXT PRIMARY KEY,
@@ -147,7 +144,7 @@ function clearWipeTimer(guildId) {
 }
 async function wipeGuildVotes(guildId) {
   await pool.query(`DELETE FROM votes   WHERE guild_id=$1`, [guildId]);
-  await pool.query(`DELETE FROM items   WHERE guild_id=$1`, [guildId]); // Flags verschwinden damit auch
+  await pool.query(`DELETE FROM items   WHERE guild_id=$1`, [guildId]); // Flags & Items weg
   await pool.query(`DELETE FROM winners WHERE guild_id=$1`, [guildId]); // Wins resetten
   await clearWindow(guildId);
   clearWipeTimer(guildId);
@@ -175,37 +172,6 @@ async function ensureWindowActive(guildId) {
 async function windowStillActive(guildId) {
   const end = await getWindowEnd(guildId);
   return !!end && end.getTime() > Date.now();
-}
-
-/* ===== Item Flags ===== */
-async function flagItemRolled(guildId, slug, byUserId, manual) {
-  await pool.query(
-    `UPDATE items
-        SET rolled_at = NOW(),
-            rolled_by = $4,
-            rolled_manual = COALESCE(rolled_manual, FALSE) OR $3
-      WHERE guild_id = $1 AND item_slug = $2`,
-    [guildId, slug, !!manual, byUserId || null]
-  );
-}
-
-async function getUnrolledItemsWithVotes(guildId) {
-  const { rows } = await pool.query(
-    `
-    SELECT i.item_slug, i.item_name_first AS name,
-           COALESCE(SUM(CASE WHEN v.type IN ('gear','trait','litho') THEN 1 ELSE 0 END),0)::int AS total_votes
-      FROM items i
- LEFT JOIN votes v
-        ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
-     WHERE i.guild_id=$1
-       AND i.rolled_at IS NULL
-  GROUP BY i.item_slug, i.item_name_first
-    HAVING COALESCE(SUM(CASE WHEN v.type IN ('gear','trait','litho') THEN 1 ELSE 0 END),0) > 0
-  ORDER BY RANDOM()
-    `,
-    [guildId]
-  );
-  return rows;
 }
 
 /* ===== Votes ===== */
@@ -304,6 +270,26 @@ async function countWinsInCurrentWindow(guildId, userId) {
   return rows[0]?.wins ?? 0;
 }
 
+/* ===== Item-Listen für Roll ===== */
+async function getUnrolledItemsWithVotes(guildId) {
+  const { rows } = await pool.query(
+    `
+    SELECT i.item_slug, i.item_name_first AS name,
+           COALESCE(SUM(CASE WHEN v.type IN ('gear','trait','litho') THEN 1 ELSE 0 END),0)::int AS total_votes
+      FROM items i
+ LEFT JOIN votes v
+        ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
+     WHERE i.guild_id=$1
+       AND i.rolled_at IS NULL
+  GROUP BY i.item_slug, i.item_name_first
+    HAVING COALESCE(SUM(CASE WHEN v.type IN ('gear','trait','litho') THEN 1 ELSE 0 END),0) > 0
+  ORDER BY i.item_name_first
+    `,
+    [guildId]
+  );
+  return rows; // [{item_slug,name,total_votes}, ...]
+}
+
 /* ===== Roll ===== */
 function reasonEmojiLabel(t) {
   if (t === "gear") return "⚔️ Gear";
@@ -325,17 +311,15 @@ function buildRankingLines(sorted) {
 }
 
 /**
- * /roll-Logik:
+ * Roll-Logik je Item:
  * - pro User bester Grund (Gear > Trait > Litho)
  * - 1 Roll (1..100)
  * - Sort: Grund (desc) > Wins (asc) > Roll (desc)
- * - Sieger in winners speichern (mit aktuellem window_end_at), Gewinneranzeige zeigt neue Win-Zahl
- * - Item als gerollt flaggen (manual=true bei /roll, false bei /roll-all)
+ * - Sieger wird in winners gespeichert (mit window_end_at)
+ * - Item wird als gerollt geflaggt (manual=true bei /roll Dropdown, false bei /roll-all)
  */
-async function rollForItem(guild, guildId, itemInput, rolledByUserId, manualFlag) {
-  const { slug, displayName } = await ensureCanonicalItem(guildId, itemInput);
-
-  // Teilnehmer aggregieren
+async function rollForItem(guild, guildId, itemSlug, displayItemName, rolledByUserId, manualFlag) {
+  // Aggregation: bester Grund je User
   const { rows } = await pool.query(
     `
       SELECT user_id,
@@ -347,11 +331,11 @@ async function rollForItem(guild, guildId, itemInput, rolledByUserId, manualFlag
        WHERE guild_id=$1 AND item_slug=$2
     GROUP BY user_id
     `,
-    [guildId, slug]
+    [guildId, itemSlug]
   );
-  if (rows.length === 0) return { displayItemName: displayName, winner: null, lines: null };
+  if (rows.length === 0) return null;
 
-  // Aufbereiten
+  // Resolve Teilnehmer
   const resolved = [];
   for (const r of rows) {
     let type = "litho";
@@ -372,7 +356,7 @@ async function rollForItem(guild, guildId, itemInput, rolledByUserId, manualFlag
     resolved.push({ userId: r.user_id, type, displayName: displayNameU, roll, wins });
   }
 
-  // Sortierung
+  // Sortieren: Grund > Wins(asc) > Roll(desc)
   resolved.sort((a, b) => {
     const byReason = (REASON_WEIGHT[b.type] ?? 0) - (REASON_WEIGHT[a.type] ?? 0);
     if (byReason !== 0) return byReason;
@@ -390,71 +374,55 @@ async function rollForItem(guild, guildId, itemInput, rolledByUserId, manualFlag
     await pool.query(
       `INSERT INTO winners (guild_id, item_slug, user_id, window_end_at)
        VALUES ($1,$2,$3,$4)`,
-      [guildId, slug, winner.userId, windowEnd.toISOString()]
+      [guildId, itemSlug, winner.userId, windowEnd.toISOString()]
     );
-    winner.wins = (winner.wins || 0) + 1; // Anzeige sofort mit neuem Wert
+    // Anzeige sofort mit neuem Wert
+    winner.wins = (winner.wins || 0) + 1;
   }
-  await flagItemRolled(guildId, slug, rolledByUserId || null, !!manualFlag);
+  await pool.query(
+    `UPDATE items
+        SET rolled_at=NOW(), rolled_by=$3, rolled_manual = COALESCE(rolled_manual,FALSE) OR $4
+      WHERE guild_id=$1 AND item_slug=$2`,
+    [guildId, itemSlug, rolledByUserId || null, !!manualFlag]
+  );
 
-  return { displayItemName: displayName, winner, lines, slug };
+  return { displayItemName, winner, lines };
 }
 
-/* ===== Tutorial (/vote-info) – ERWEITERT ===== */
+/* ===== Tutorial (/vote-info) ===== */
 function getVoteInfoEmbeds() {
   const e1 = new EmbedBuilder()
-    .setTitle("🔰 Was macht der Bot?")
+    .setTitle("🔰 Für alle User")
     .setDescription(
-      [
-        "Ihr könnt für **Items** abstimmen (mit **einem Grund**) und der Bot lost fair aus.",
-        "",
-        "**Gründe (Wertigkeit):** ⚔️ Gear > 💠 Trait > 📜 Litho",
-        "_Diese Reihenfolge ist wichtiger als die Würfelzahl._",
-        "",
-        "### 48-Stunden-Fenster",
-        "Sobald jemand das erste Mal `/vote` nutzt, startet ein **48h-Fenster**.",
-        "• Alle Votes zählen nur **innerhalb** dieses Fensters.",
-        "• Nach Ablauf wird alles automatisch zurückgesetzt."
-      ].join("\n")
+      "Ihr könnt für **Items** abstimmen (mit **einem Grund**).\n\n" +
+      "**Gründe (Wertigkeit):** ⚔️ Gear > 💠 Trait > 📜 Litho\n" +
+      "_Diese Reihenfolge ist wichtiger als die Würfelzahl._\n\n" +
+      "Sobald jemand das erste Mal `/vote` nutzt, startet ein **48h-Fenster**.\n" +
+      "Nach Ablauf wird alles automatisch zurückgesetzt."
     );
 
   const e2 = new EmbedBuilder()
     .setTitle("🧑‍🤝‍🧑 Befehle für User")
     .setDescription(
-      [
-        "• **`/vote`** – Item eingeben → **einen Grund** wählen.",
-        "• **`/vote-show`** – Zeigt die aktuellen Votes (optional `item`).",
-        "• **`/vote-remove`** – Löscht **deine** Votes für ein Item.",
-        "",
-        "### Auslosung (wie wird sortiert?)",
-        "1) **Grund** (⚔️ > 💠 > 📜)",
-        "2) **Gewinne im aktuellen 48h-Fenster** (weniger Wins = besser)",
-        "3) **Würfelzahl** (höher ist besser)"
-      ].join("\n")
+      "• `/vote` – Item + **genau einen** Grund wählen\n" +
+      "• `/vote-show` – Aktuelle Votes ansehen (optional mit Item)\n" +
+      "• `/vote-remove` – Eigene Votes fürs Item löschen"
     );
 
   const e3 = new EmbedBuilder()
-    .setTitle("🛡️ Für Mods – Rares vs. Rest")
+    .setTitle("🛡️ Für Mods – Rollen & Ausgabe")
     .setDescription(
       [
-        "• **Rares manuell:** `/roll <Item>` – führt eine einzelne Auslosung für das Item aus **und markiert es als gerollt**.",
-        "• **Alles andere automatisch:** `/roll-all` – rollt **alle noch ungerollten** Items mit gültigen Votes in **zufälliger Reihenfolge** und flaggt sie.",
-        "• Items werden mit Zeit & Auslöser markiert (wer gerollt hat).",
+        "• **Rares manuell:** `/roll` → du bekommst ein **Dropdown** aller **offenen** Items mit Votes und wählst eins.",
+        "• **Alles andere:** `/roll-all` → rollt **alle offenen** Items automatisch in **zufälliger Reihenfolge**.",
+        "• Sortierung: **Grund** (⚔️>💠>📜) > **Wins (48h, weniger besser)** > **Zahl (1–100)**.",
+        "• **`/winner`** → schlichte Liste **Item — User** (ephemeral) für die Preisausgabe.",
+        "• **`/reducew`** → Wins eines Users im aktuellen Fenster reduzieren (Dropdown + Anzahl).",
+        "• **`/vote-clear`** → Hard Reset: **Votes, Items (Flags) & Winners**."
       ].join("\n")
     );
 
-  const e4 = new EmbedBuilder()
-    .setTitle("🧾 Gewinnerliste & Preisausgabe")
-    .setDescription(
-      [
-        "• **`/winner`** – liefert eine **schlichte Liste** nur für Mods (ephemeral):",
-        "  `Itemname — Username`",
-        "  Kein Emoji, kein Schnickschnack – **sofort lesbar** zur Preisausgabe.",
-        "• **`/reducew`** – reduziert Wins eines Users (Dropdown + Anzahl), nur für Mods.",
-        "• **`/vote-clear`** – Hard Reset für dieses Fenster: **Votes, Items (Flags) und Winners**."
-      ].join("\n")
-    );
-
-  return [e1, e2, e3, e4];
+  return [e1, e2, e3];
 }
 
 /* ===== Reduce Wins Helpers ===== */
@@ -498,7 +466,6 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds], partials: [Part
 
 /* ===== Slash Commands ===== */
 async function registerSlash() {
-  if (!CLIENT_ID) return;
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
   const commands = [
@@ -506,35 +473,35 @@ async function registerSlash() {
       .setDescription("Vote abgeben: Item eingeben, dann Grund wählen.")
       .toJSON(),
     new SlashCommandBuilder().setName("vote-show")
-      .setDescription("Aktuelle Votes anzeigen (Fenster läuft 48h ab dem ersten Vote)")
+      .setDescription("Aktuelle Votes anzeigen (Fenster läuft 48h ab erstem Vote)")
       .addStringOption(o => o.setName("item").setDescription("Optional: nur dieses Item").setRequired(false))
       .toJSON(),
     new SlashCommandBuilder().setName("vote-clear")
-      .setDescription("Alle Votes sofort löschen (Mods)")
+      .setDescription("Alle Votes & Gewinner zurücksetzen (Mods)")
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .toJSON(),
     new SlashCommandBuilder().setName("vote-remove")
       .setDescription("Eigene Votes für ein Item löschen")
       .addStringOption(o => o.setName("item").setDescription("Item-Name").setRequired(true))
       .toJSON(),
     new SlashCommandBuilder().setName("roll")
-      .setDescription("Würfelt das Item (Rares manuell) – markiert als gerollt")
-      .addStringOption(o => o.setName("item").setDescription("Item-Name").setRequired(true))
+      .setDescription("Rares manuell: Dropdown der offenen Items mit Votes")
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .toJSON(),
     new SlashCommandBuilder().setName("roll-all")
-      .setDescription("Rollt alle noch ungerollten Items mit Votes (random Reihenfolge)")
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-      .toJSON(),
-    new SlashCommandBuilder().setName("vote-info")
-      .setDescription("Zeigt das Kurz-Tutorial (nur für dich sichtbar).")
-      .toJSON(),
-    new SlashCommandBuilder().setName("reducew")
-      .setDescription("Wins eines Users im aktuellen Fenster reduzieren (Mods)")
+      .setDescription("Rollt alle offenen Items (random Reihenfolge)")
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .toJSON(),
     new SlashCommandBuilder().setName("winner")
       .setDescription("Schlichte Gewinnerliste (Item — User) im aktuellen 48h-Fenster (nur Mods, ephemeral).")
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .toJSON(),
+    new SlashCommandBuilder().setName("reducew")
+      .setDescription("Wins eines Users im aktuellen Fenster reduzieren (Mods)")
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .toJSON(),
+    new SlashCommandBuilder().setName("vote-info")
+      .setDescription("Kurz-Tutorial anzeigen (nur für dich sichtbar).")
       .toJSON()
   ];
 
@@ -547,13 +514,12 @@ async function registerSlash() {
   }
 }
 
-/* ===== Ready ===== */
+/* ===== Ready: Timer reaktivieren ===== */
 client.once("ready", async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await initDB();
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e?.message || e); }
 
-  // laufendes Fenster (Timer) reaktivieren
   const { rows } = await pool.query(`SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`);
   for (const r of rows) {
     const end = new Date(r.window_end_at);
@@ -572,18 +538,19 @@ client.once("ready", async () => {
 /* ===== Interactions ===== */
 client.on("interactionCreate", async (interaction) => {
   try {
+    // Slash-Commands
     if (interaction.isChatInputCommand()) {
       const guild = interaction.guild;
       const guildId = interaction.guildId;
 
-      // /vote -> Modal öffnen
+      // /vote -> Modal (Item-Namen eingeben)
       if (interaction.commandName === "vote") {
         await ensureWindowActive(guildId);
 
         const modal = new ModalBuilder().setCustomId("voteItemModal").setTitle("Vote abgeben");
         const itemInput = new TextInputBuilder()
           .setCustomId("itemName").setLabel("Item-Name")
-          .setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder("z. B. Schwert");
+          .setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder("z. B. Schwert der Pein");
         modal.addComponents(new ActionRowBuilder().addComponents(itemInput));
         return interaction.showModal(modal);
       }
@@ -620,23 +587,23 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // /roll (manuell für Rares)
+      // /roll → Dropdown der offenen Items mit Votes (ephemeral), Ergebnis public im Channel
       if (interaction.commandName === "roll") {
-        const item = interaction.options.getString("item", true);
-        const { displayItemName, winner, lines } = await rollForItem(guild, guildId, item, interaction.user.id, true);
-
-        if (!lines) {
-          return interaction.reply({ content: `Für **${displayItemName}** gibt es keine gültigen Teilnehmer.`, ephemeral: true });
+        const items = await getUnrolledItemsWithVotes(guildId);
+        if (items.length === 0) {
+          return interaction.reply({ content: "Keine **offenen Items mit Votes** gefunden.", ephemeral: true });
         }
-
-        const embed = new EmbedBuilder()
-          .setTitle(`🎲 Würfelrunde für **${displayItemName}**`)
-          .setDescription(`${lines}\n\n🏆 Gewinner: ${winner.displayName} (${reasonEmojiLabel(winner.type)} | ${winner.wins}W)`);
-
-        return interaction.reply({ embeds: [embed] });
+        const options = items.slice(0, 25).map(i => ({ label: i.name, value: i.item_slug })); // max 25
+        const select = new StringSelectMenuBuilder()
+          .setCustomId("roll:select")
+          .setPlaceholder("Wähle ein Item für den manuellen Roll")
+          .addOptions(...options)
+          .setMinValues(1).setMaxValues(1);
+        const row = new ActionRowBuilder().addComponents(select);
+        return interaction.reply({ content: "Wähle ein Item:", components: [row], ephemeral: true });
       }
 
-      // /roll-all (random alle offenen Items)
+      // /roll-all → alles offene random
       if (interaction.commandName === "roll-all") {
         const perms = interaction.memberPermissions;
         if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
@@ -645,15 +612,15 @@ client.on("interactionCreate", async (interaction) => {
 
         const items = await getUnrolledItemsWithVotes(guildId);
         if (items.length === 0) {
-          return interaction.reply({ content: "Keine offenen Items mit Votes gefunden. Alles gerollt. ✅", ephemeral: true });
+          return interaction.reply({ content: "Keine **offenen Items mit Votes** gefunden. Alles gerollt. ✅", ephemeral: true });
         }
 
         await interaction.reply({ content: `Starte Roll-All für **${items.length}** Items…`, ephemeral: false });
 
-        for (const it of items) {
+        for (const it of items.sort(() => Math.random() - 0.5)) { // random Reihenfolge
           try {
-            const res = await rollForItem(guild, guildId, it.name, interaction.user.id, false);
-            if (!res.lines) continue;
+            const res = await rollForItem(guild, guildId, it.item_slug, it.name, interaction.user.id, false);
+            if (!res) continue; // safety
             const embed = new EmbedBuilder()
               .setTitle(`🎲 Würfelrunde für **${res.displayItemName}**`)
               .setDescription(`${res.lines}\n\n🏆 Gewinner: ${res.winner.displayName} (${reasonEmojiLabel(res.winner.type)} | ${res.winner.wins}W)`);
@@ -663,35 +630,6 @@ client.on("interactionCreate", async (interaction) => {
           }
         }
         return;
-      }
-
-      // /vote-info (ephemeral)
-      if (interaction.commandName === "vote-info") {
-        const embeds = getVoteInfoEmbeds();
-        return interaction.reply({ embeds, ephemeral: true });
-      }
-
-      // /reducew
-      if (interaction.commandName === "reducew") {
-        const perms = interaction.memberPermissions;
-        if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
-          return interaction.reply({ content: "Nur Moderation darf das.", ephemeral: true });
-        }
-
-        const winners = await getCurrentWinnerUsers(guild, guildId);
-        if (winners.length === 0) {
-          return interaction.reply({ content: "Keine Gewinner im aktuellen 48h-Fenster gefunden.", ephemeral: true });
-        }
-
-        const options = winners.slice(0, 25).map(w => ({ label: `${w.name} | ${w.wins}W`, value: w.userId }));
-        const select = new StringSelectMenuBuilder()
-          .setCustomId("reduceW:select")
-          .setPlaceholder("Wähle den User")
-          .addOptions(...options)
-          .setMinValues(1)
-          .setMaxValues(1);
-        const row = new ActionRowBuilder().addComponents(select);
-        return interaction.reply({ content: "User auswählen:", components: [row], ephemeral: true });
       }
 
       // /winner — schlichte Liste (Item — User), Mods only, ephemeral
@@ -732,9 +670,64 @@ client.on("interactionCreate", async (interaction) => {
 
         return interaction.reply({ content: lines.join("\n"), ephemeral: true });
       }
+
+      // /reducew — Dropdown + Modal, Antwort nur für Mod
+      if (interaction.commandName === "reducew") {
+        const perms = interaction.memberPermissions;
+        if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
+          return interaction.reply({ content: "Nur Moderation darf das.", ephemeral: true });
+        }
+
+        const winners = await getCurrentWinnerUsers(guild, guildId);
+        if (winners.length === 0) {
+          return interaction.reply({ content: "Keine Gewinner im aktuellen 48h-Fenster gefunden.", ephemeral: true });
+        }
+
+        const options = winners.slice(0, 25).map(w => ({ label: `${w.name} | ${w.wins}W`, value: w.userId }));
+        const select = new StringSelectMenuBuilder()
+          .setCustomId("reduceW:select")
+          .setPlaceholder("Wähle den User")
+          .addOptions(...options)
+          .setMinValues(1).setMaxValues(1);
+        const row = new ActionRowBuilder().addComponents(select);
+        return interaction.reply({ content: "User auswählen:", components: [row], ephemeral: true });
+      }
+
+      // /vote-info (nur für den Anfragenden)
+      if (interaction.commandName === "vote-info") {
+        const embeds = getVoteInfoEmbeds();
+        return interaction.reply({ embeds, ephemeral: true });
+      }
     }
 
-    // Select → reducew choose user
+    // StringSelect: /roll Dropdown-Auswahl → public Ergebnis
+    if (interaction.isStringSelectMenu() && interaction.customId === "roll:select") {
+      const guild = interaction.guild;
+      const guildId = interaction.guildId;
+      const itemSlug = interaction.values?.[0];
+      if (!itemSlug) return interaction.update({ content: "Kein Item gewählt.", components: [] });
+
+      const { rows } = await pool.query(
+        `SELECT item_name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
+        [guildId, itemSlug]
+      );
+      const displayName = rows[0]?.item_name_first || itemSlug;
+
+      const res = await rollForItem(guild, guildId, itemSlug, displayName, interaction.user.id, true);
+      if (!res) return interaction.update({ content: `Keine Teilnehmer für **${displayName}**.`, components: [] });
+
+      const embed = new EmbedBuilder()
+        .setTitle(`🎲 Würfelrunde für **${res.displayItemName}**`)
+        .setDescription(`${res.lines}\n\n🏆 Gewinner: ${res.winner.displayName} (${reasonEmojiLabel(res.winner.type)} | ${res.winner.wins}W)`);
+
+      // Öffentlich in den Channel posten:
+      try { await interaction.channel?.send({ embeds: [embed] }); } catch {}
+
+      // Ephemeral UI schließen:
+      return interaction.update({ content: `Roll für **${res.displayItemName}** veröffentlicht.`, components: [] });
+    }
+
+    // StringSelect: reducew → Modal öffnen
     if (interaction.isStringSelectMenu() && interaction.customId === "reduceW:select") {
       const userId = interaction.values?.[0];
       if (!userId) return interaction.update({ content: "Kein User gewählt.", components: [] });
@@ -746,7 +739,51 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.showModal(modal);
     }
 
-    // Modal submit → reducew
+    // Modal: /vote → Grund-Auswahl anzeigen
+    if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
+      const item = interaction.fields.getTextInputValue("itemName");
+      const guildId = interaction.guildId;
+
+      await ensureWindowActive(guildId);
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId(`voteType:${item}`)
+        .setPlaceholder("Wähle GENAU EINEN Grund")
+        .addOptions(
+          { label: "Gear",  value: "gear"  },
+          { label: "Trait", value: "trait" },
+          { label: "Litho", value: "litho" }
+        )
+        .setMinValues(1).setMaxValues(1);
+
+      const row = new ActionRowBuilder().addComponents(select);
+      return interaction.reply({ content: `Item: **${item}** – wähle deinen Grund:`, components: [row], ephemeral: true });
+    }
+
+    // StringSelect: Grund gewählt → Vote speichern
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
+      const itemInput = interaction.customId.slice("voteType:".length);
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+
+      if (!(await windowStillActive(guildId))) {
+        await wipeGuildVotes(guildId);
+        return interaction.update({ content: "⏱️ Das 48h-Fenster ist vorbei. Starte mit einem neuen `/vote` neu.", components: [] });
+      }
+
+      const chosen = interaction.values?.[0];
+      if (!chosen) return interaction.update({ content: "Kein Grund gewählt.", components: [] });
+
+      const { isNew, value, displayName } = await addVoteIfNew(guildId, itemInput, chosen, userId);
+      const line = isNew
+        ? `✔️ **${chosen.toUpperCase()}** gezählt → **${value}**`
+        : `⚠️ **${chosen.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`;
+
+      const summary = await showVotes(guildId, displayName);
+      return interaction.update({ content: `${line}\n\n${summary}`, components: [] });
+    }
+
+    // Modal submit: reducew
     if (interaction.isModalSubmit() && interaction.customId.startsWith("reduceW:modal:")) {
       const userId = interaction.customId.split(":")[2];
       const guild = interaction.guild;
@@ -772,49 +809,6 @@ client.on("interactionCreate", async (interaction) => {
         ephemeral: true
       });
     }
-
-    // Voting workflow
-    if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
-      const item = interaction.fields.getTextInputValue("itemName");
-      const guildId = interaction.guildId;
-
-      await ensureWindowActive(guildId);
-
-      const select = new StringSelectMenuBuilder()
-        .setCustomId(`voteType:${item}`)
-        .setPlaceholder("Wähle GENAU EINEN Grund")
-        .addOptions(
-          { label: "Gear",  value: "gear"  },
-          { label: "Trait", value: "trait" },
-          { label: "Litho", value: "litho" }
-        )
-        .setMinValues(1).setMaxValues(1);
-
-      const row = new ActionRowBuilder().addComponents(select);
-      return interaction.reply({ content: `Item: **${item}** – wähle deinen Grund:`, components: [row], ephemeral: true });
-    }
-
-    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
-      const itemInput = interaction.customId.slice("voteType:".length);
-      const guildId = interaction.guildId;
-      const userId = interaction.user.id;
-
-      if (!(await windowStillActive(guildId))) {
-        await wipeGuildVotes(guildId);
-        return interaction.update({ content: "⏱️ Das 48h-Fenster ist vorbei. Starte mit einem neuen `/vote` neu.", components: [] });
-      }
-
-      const chosen = interaction.values?.[0];
-      if (!chosen) return interaction.update({ content: "Kein Grund gewählt.", components: [] });
-
-      const { isNew, value, displayName } = await addVoteIfNew(guildId, itemInput, chosen, userId);
-      const line = isNew
-        ? `✔️ **${chosen.toUpperCase()}** gezählt → **${value}**`
-        : `⚠️ **${chosen.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`;
-
-      const summary = await showVotes(guildId, displayName);
-      return interaction.update({ content: `${line}\n\n${summary}`, components: [] });
-    }
   } catch (e) {
     console.error("Interaction error:", e);
     try {
@@ -828,5 +822,5 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-/* ===== Register + Login ===== */
+/* ===== Start ===== */
 client.login(TOKEN);
