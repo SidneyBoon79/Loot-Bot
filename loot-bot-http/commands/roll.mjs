@@ -1,210 +1,100 @@
-// commands/roll.mjs
-// /roll – rollt EIN bestimmtes Item fair aus
-// Sortierung: Grund (⚔️>💠>📜) > Wins (aufsteigend) > Wurf (absteigend)
-// Erwartet (idealerweise) eine Option "item"; falls die in deinem Registrar noch nicht existiert,
-// bekommst du eine Liste der offenen Items zurück und kannst das Item namentlich angeben,
-// bis wir die Dropdown-UI verdrahten.
-
+// commands/roll.mjs — manueller Roll (Dropdown), Schema: item_slug/type/item_name_first
+// Sortierung: Grund (⚔️>💠>📜) desc → Wins asc → Wurf(desc). Gewinnerzeile zeigt Grund + neuen Win-Count.
 const REASON_WEIGHT = { gear: 3, trait: 2, litho: 1 };
 
-function reasonLabel(t) {
-  if (t === "gear") return "⚔️ Gear";
-  if (t === "trait") return "💠 Trait";
-  if (t === "litho") return "📜 Litho";
-  return t;
-}
-function medal(i) {
-  if (i === 0) return "🥇";
-  if (i === 1) return "🥈";
-  if (i === 2) return "🥉";
-  const map = { 3: "4️⃣", 4: "5️⃣", 5: "6️⃣", 6: "7️⃣", 7: "8️⃣", 8: "9️⃣", 9: "🔟" };
-  return map[i] || `${i + 1}.`;
-}
-
-function indexByName(options = []) {
-  const map = Object.create(null);
-  for (const o of options) map[o.name] = o;
-  return map;
-}
-
-function normalizeItem(raw) {
-  return (raw ?? "").trim().slice(0, 200);
-}
+function fmt(n){ return new Intl.NumberFormat("de-DE").format(Number(n)||0); }
 
 export async function run(ctx) {
-  ctx.requireMod?.(); // Mods only
-  await ensureSchema(ctx.db);
+  ctx.requireMod?.();
 
-  const opt = indexByName(ctx.options);
-  const itemNameInput = normalizeItem(opt.item?.value ?? "");
+  // itemSlug kommt vom Dropdown (server.mjs setzt ctx.itemSlug), sonst Option "item"
+  const passed = ctx.itemSlug || (ctx.options?.find(o => o.name === "item")?.value);
+  const itemSlug = (passed || "").trim();
+  if (!itemSlug) return ctx.followUp?.("Kein Item ausgewählt.", { ephemeral: true }) || ctx.reply("Kein Item ausgewählt.", { ephemeral: true });
 
-  // Falls kein Item übergeben wurde: Liste offener Items zeigen (mit Votes im 48h-Fenster)
-  if (!itemNameInput) {
-    const open = await openItemsWithVotes(ctx.db, ctx.guildId);
-    if (open.length === 0) {
-      return ctx.reply("Keine **offenen Items mit Votes** im 48h-Fenster gefunden. ✅", { ephemeral: true });
-    }
-    const list = open.map(x => `• ${x.item_name} — ${x.c_votes} Votes`).join("\n");
-    return ctx.reply(
-      "Gib bitte ein Item an (`/roll item:<Name>`), bis das Dropdown-UI verdrahtet ist.\n" +
-      "**Offene Items:**\n" + list,
-      { ephemeral: true }
-    );
-  }
+  // Name holen + Votes im 48h-Fenster ziehen
+  const meta = await ctx.db.query(
+    `SELECT MAX(item_name_first) AS name_first,
+            BOOL_OR(rolled_at IS NOT NULL OR COALESCE(rolled_manual,false)) AS rolled
+       FROM items
+      WHERE guild_id=$1 AND item_slug=$2`,
+    [ctx.guildId, itemSlug]
+  );
+  const itemName = meta.rows[0]?.name_first || itemSlug;
 
-  // Prüfen, ob es für das Item überhaupt Votes im 48h-Fenster gibt
-  const hasVotes = await hasVotes48h(ctx.db, ctx.guildId, itemNameInput);
-  if (!hasVotes) {
-    return ctx.reply(`Für **${itemNameInput}** gibt’s aktuell keine gültigen Votes (48h).`, { ephemeral: true });
-  }
-
-  // Teilnehmer aggregieren: pro User der "beste" Grund (Gear > Trait > Litho)
-  const voters = await topReasonPerUser(ctx.db, ctx.guildId, itemNameInput);
-  if (voters.length === 0) {
-    return ctx.reply(`Keine Teilnehmer für **${itemNameInput}**.`, { ephemeral: true });
-  }
-
-  // Für jeden Teilnehmer: Wins (Debuff) + Wurf
-  for (const v of voters) {
-    v.display = `<@${v.user_id}>`; // mentions statt REST-User-Lookup (serverless-freundlich)
-    v.roll = Math.floor(Math.random() * 100) + 1;
-
-    const { rows } = await ctx.db.query(
-      `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
-      [ctx.guildId, v.user_id]
-    );
-    v.wins = rows.length ? Number(rows[0].win_count) || 0 : 0;
-  }
-
-  // Sortierung: Grund (desc) > Wins (asc) > Roll (desc)
-  voters.sort((a, b) => {
-    const r = (REASON_WEIGHT[b.reason] ?? 0) - (REASON_WEIGHT[a.reason] ?? 0);
-    if (r !== 0) return r;
-    const w = a.wins - b.wins;
-    if (w !== 0) return w;
-    return b.roll - a.roll;
-  });
-
-  const winner = voters[0];
-
-  // DB-Updates: Item flaggen + Wins des Gewinners +1
-  await ctx.db.query(
-    `UPDATE items
-        SET rolled = TRUE, winner_id = $3, rolled_by = $4, rolled_at = NOW()
-      WHERE guild_id = $1 AND item_name = $2`,
-    [ctx.guildId, itemNameInput, winner.user_id, ctx.userId]
+  const { rows: votes } = await ctx.db.query(
+    `SELECT v.user_id, v.type,
+            COALESCE(w.win_count,0) AS wins
+       FROM votes v
+       LEFT JOIN wins w
+              ON w.guild_id = v.guild_id AND w.user_id = v.user_id
+      WHERE v.guild_id=$1 AND v.item_slug=$2
+        AND v.created_at >= NOW() - INTERVAL '48 hours'`,
+    [ctx.guildId, itemSlug]
   );
 
+  if (!votes.length) {
+    const msg = `Für **${itemName}** gibt es keine gültigen Votes im 48h-Fenster.`;
+    return ctx.followUp?.(msg, { ephemeral: true }) || ctx.reply(msg, { ephemeral: true });
+  }
+
+  // Ranking nach Regeln
+  const ranked = votes.map(v => ({
+    user_id: v.user_id,
+    reason:  v.type,
+    weight:  REASON_WEIGHT[v.type] || 0,
+    wins:    Number(v.wins)||0,
+    roll:    Math.floor(Math.random()*1000000) // groß für stabile Ordnung
+  }))
+  .sort((a,b) => {
+    if (a.weight !== b.weight) return b.weight - a.weight; // Grund
+    if (a.wins   !== b.wins)   return a.wins   - b.wins;   // Wins asc
+    return b.roll - a.roll;                                   // Wurf desc
+  });
+
+  const winner = ranked[0];
+
+  // DB-Updates: Wins + Item markieren
   await ctx.db.query(
     `INSERT INTO wins (guild_id, user_id, win_count, updated_at)
-     VALUES ($1, $2, 1, NOW())
-     ON CONFLICT (guild_id, user_id)
+     VALUES ($1,$2,1,NOW())
+     ON CONFLICT (guild_id,user_id)
      DO UPDATE SET win_count = wins.win_count + 1, updated_at = NOW()`,
     [ctx.guildId, winner.user_id]
   );
 
-  // Ausgabe bauen
-  const lines = voters.map((v, i) => {
-    return `${medal(i)} ${v.display} — ${v.roll} (${reasonLabel(v.reason)} | ${v.wins}W)`;
-  }).join("\n");
-
-  const winnerLine = `🏆 Gewinner: ${winner.display} (${reasonLabel(winner.reason)} | ${winner.wins + 1}W)`;
-
-  // Public im Channel posten (FollowUp), kurze ephemere Bestätigung an den Mod
-  await ctx.followUp({
-    content: `🎲 Würfelrunde für **${itemNameInput}**\n\n${lines}\n\n${winnerLine}`
-  }, { ephemeral: false });
-
-  return ctx.reply(`Roll für **${itemNameInput}** veröffentlicht.`, { ephemeral: true });
-}
-
-/* ===== Helpers / SQL ===== */
-
-async function ensureSchema(db) {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS votes (
-      id         BIGSERIAL PRIMARY KEY,
-      guild_id   TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      item_name  TEXT NOT NULL,
-      reason     TEXT NOT NULL CHECK (reason IN ('gear','trait','litho')),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (guild_id, user_id, item_name)
-    );
-  `);
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS items (
-      id         BIGSERIAL PRIMARY KEY,
-      guild_id   TEXT NOT NULL,
-      item_name  TEXT NOT NULL,
-      rolled     BOOLEAN NOT NULL DEFAULT FALSE,
-      winner_id  TEXT,
-      rolled_by  TEXT,
-      rolled_at  TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (guild_id, item_name)
-    );
-  `);
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS wins (
-      guild_id   TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      win_count  INTEGER NOT NULL DEFAULT 0,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (guild_id, user_id)
-    );
-  `);
-
-  await db.query(`CREATE INDEX IF NOT EXISTS votes_guild_created_idx ON votes (guild_id, created_at);`);
-}
-
-async function openItemsWithVotes(db, guildId) {
-  const { rows } = await db.query(
-    `
-    WITH windowed AS (
-      SELECT * FROM votes
-       WHERE guild_id=$1 AND created_at > NOW() - INTERVAL '48 hours'
-    )
-    SELECT i.item_name,
-           COALESCE(SUM(CASE WHEN w.item_name IS NOT NULL THEN 1 ELSE 0 END),0)::int AS c_votes
-      FROM items i
- LEFT JOIN windowed w
-        ON w.guild_id=i.guild_id AND w.item_name=i.item_name
-     WHERE i.guild_id=$1 AND i.rolled=FALSE
-  GROUP BY i.item_name
-    HAVING COALESCE(SUM(CASE WHEN w.item_name IS NOT NULL THEN 1 ELSE 0 END),0) > 0
-  ORDER BY i.item_name ASC
-    `,
-    [guildId]
+  await ctx.db.query(
+    `UPDATE items
+        SET rolled_at = NOW(),
+            rolled_by = $3,
+            rolled_manual = TRUE
+      WHERE guild_id=$1 AND item_slug=$2`,
+    [ctx.guildId, itemSlug, winner.user_id]
   );
-  return rows;
-}
 
-async function hasVotes48h(db, guildId, itemName) {
-  const { rows } = await db.query(
-    `SELECT COUNT(*)::int AS c
-       FROM votes
-      WHERE guild_id=$1 AND item_name=$2
-        AND created_at > NOW() - INTERVAL '48 hours'`,
-    [guildId, itemName]
+  // neuen Win-Count lesen für Anzeige
+  const w = await ctx.db.query(
+    `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
+    [ctx.guildId, winner.user_id]
   );
-  return (rows[0]?.c ?? 0) > 0;
-}
+  const newWins = w.rows[0]?.win_count ?? 1;
 
-async function topReasonPerUser(db, guildId, itemName) {
-  const { rows } = await db.query(
-    `
-    SELECT user_id,
-           CASE MAX(CASE reason WHEN 'gear' THEN 3 WHEN 'trait' THEN 2 WHEN 'litho' THEN 1 ELSE 0 END)
-             WHEN 3 THEN 'gear' WHEN 2 THEN 'trait' ELSE 'litho' END AS reason
-      FROM votes
-     WHERE guild_id=$1 AND item_name=$2
-       AND created_at > NOW() - INTERVAL '48 hours'
-  GROUP BY user_id
-    `,
-    [guildId, itemName]
-  );
-  return rows;
+  // Ausgabe bauen (öffentlich)
+  const lines = ranked.slice(0, 15).map((r, idx) => {
+    const pos = idx+1;
+    const marker = pos === 1 ? "🏆" : "—";
+    const reason = r.reason === "gear" ? "⚔️ Gear" : r.reason === "trait" ? "💠 Trait" : "📜 Litho";
+    return `${marker} <@${r.user_id}> · ${reason} · Wins ${fmt(r.wins)} · Wurf ${fmt(r.roll)}`;
+  });
+
+  const winReason = winner.reason === "gear" ? "⚔️ Gear" : winner.reason === "trait" ? "💠 Trait" : "📜 Litho";
+  const header = `**Roll-Ergebnis für ${itemName}:**`;
+  const footer = `Gewinner: <@${winner.user_id}> — ${winReason} · neuer Stand: ${fmt(newWins)} Wins`;
+
+  const body = `${header}\n${lines.join("\n")}\n\n${footer}`;
+
+  if (ctx.useFollowUp) {
+    return ctx.followUp(body, { ephemeral: false });
+  }
+  return ctx.reply(body, { ephemeral: false });
 }
