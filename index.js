@@ -1,4 +1,5 @@
 // index.js — canonical names (erste Schreibweise), exact-one reason, 48h window, prune items
+
 import {
   Client, GatewayIntentBits, Partials,
   REST, Routes, SlashCommandBuilder,
@@ -6,6 +7,7 @@ import {
   ModalBuilder, TextInputBuilder, TextInputStyle,
   PermissionFlagsBits
 } from "discord.js";
+
 import pkg from "pg";
 const { Pool } = pkg;
 
@@ -14,6 +16,7 @@ const TOKEN = process.env.TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 const CLIENT_ID = process.env.CLIENT_ID || "";
 const GUILD_ID = process.env.GUILD_ID || "";
+
 if (!TOKEN || !DATABASE_URL) {
   console.error("Fehlende ENV: TOKEN und/oder DATABASE_URL");
   process.exit(1);
@@ -21,7 +24,7 @@ if (!TOKEN || !DATABASE_URL) {
 
 /* ===== KONSTANTEN ===== */
 const WINDOW_MS = 48 * 60 * 60 * 1000; // 48h
-const guildTimers = new Map(); // guildId -> Timeout
+const guildTimers = new Map();
 
 /* ===== DB ===== */
 const pool = new Pool({ connectionString: DATABASE_URL });
@@ -33,7 +36,7 @@ async function initDB() {
       id SERIAL PRIMARY KEY,
       guild_id   TEXT NOT NULL,
       item_slug  TEXT NOT NULL,
-      item_name  TEXT NOT NULL,
+      item_name_first  TEXT NOT NULL,
       type       TEXT NOT NULL CHECK (type IN ('gear','trait','litho')),
       user_id    TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -41,7 +44,7 @@ async function initDB() {
     );
   `);
 
-  // items (Migration: item_name_first sicherstellen)
+  // items
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
       guild_id TEXT NOT NULL,
@@ -88,7 +91,6 @@ async function clearWindow(guildId) {
 }
 
 async function wipeGuildVotes(guildId) {
-  // alles weg: erst Votes, dann Items
   await pool.query(`DELETE FROM votes WHERE guild_id=$1`, [guildId]);
   await pool.query(`DELETE FROM items WHERE guild_id=$1`, [guildId]);
   await clearWindow(guildId);
@@ -126,7 +128,7 @@ async function windowStillActive(guildId) {
   return !!end && end.getTime() > Date.now();
 }
 
-/* ===== Kanonischer Name (erste Schreibweise) ===== */
+/* ===== Kanonischer Name ===== */
 async function ensureCanonicalItem(guildId, inputName) {
   const slug = slugify(inputName);
   await pool.query(
@@ -169,7 +171,7 @@ async function addVoteIfNew(guildId, itemNameInput, type, userId) {
   const { slug, displayName } = await ensureCanonicalItem(guildId, itemNameInput);
 
   const res = await pool.query(
-    `INSERT INTO votes (guild_id, item_slug, item_name, type, user_id)
+    `INSERT INTO votes (guild_id, item_slug, item_name_first, type, user_id)
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (guild_id, item_slug, type, user_id) DO NOTHING`,
     [guildId, slug, displayName, t, userId]
@@ -190,7 +192,6 @@ async function removeUserVotes(guildId, itemNameInput, userId) {
     `DELETE FROM votes WHERE guild_id=$1 AND item_slug=$2 AND user_id=$3`,
     [guildId, slug, userId]
   );
-  // falls Item dadurch leer wurde → aus items entfernen
   await pruneEmptyItems(guildId);
   return res.rowCount;
 }
@@ -276,7 +277,6 @@ client.once("ready", async () => {
   await initDB();
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e.message); }
 
-  // evtl. laufendes Fenster reaktivieren
   const { rows } = await pool.query(
     `SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`
   );
@@ -300,7 +300,6 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const guildId = interaction.guildId;
 
-      // /vote -> Modal öffnen (startet ggf. das 48h-Fenster)
       if (interaction.commandName === "vote") {
         await ensureWindowActive(guildId);
 
@@ -317,14 +316,12 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      // /vote-show -> Übersicht
       if (interaction.commandName === "vote-show") {
         const item = interaction.options.getString("item") || null;
         const out = await showVotes(guildId, item);
         return interaction.reply({ content: out, ephemeral: false });
       }
 
-      // /vote-clear -> Mods löschen alles (inkl. Items)
       if (interaction.commandName === "vote-clear") {
         const perms = interaction.memberPermissions;
         if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
@@ -335,7 +332,6 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.", ephemeral: false });
       }
 
-      // /vote-remove -> eigene Votes für ein Item löschen (+Prune)
       if (interaction.commandName === "vote-remove") {
         const item = interaction.options.getString("item", true);
         const removed = await removeUserVotes(guildId, item, interaction.user.id);
@@ -348,7 +344,6 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    // Modal: Item eingegeben -> Auswahlmenü (GENAU EIN Grund)
     if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
       const item = interaction.fields.getTextInputValue("itemName");
       const guildId = interaction.guildId;
@@ -373,7 +368,6 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // Auswahl geklickt -> Vote speichern
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
       const itemInput = interaction.customId.slice("voteType:".length);
       const guildId = interaction.guildId;
