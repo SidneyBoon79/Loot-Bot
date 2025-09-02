@@ -194,7 +194,7 @@ async function registerSlash() {
 
   const commands = [
     new SlashCommandBuilder().setName("vote")
-      .setDescription("Vote abgeben: Item eingeben, dann Typ(en) wählen.")
+      .setDescription("Vote abgeben: Item eingeben, dann Grund wählen.")
       .toJSON(),
     new SlashCommandBuilder().setName("vote-show")
       .setDescription("Aktuelle Votes anzeigen (Fenster läuft 48h ab dem ersten Vote)")
@@ -246,7 +246,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const guildId = interaction.guildId;
 
-      // /vote -> Modal öffnen (startet bei Bedarf das 48h-Fenster)
+      // /vote -> Modal öffnen (startet ggf. das 48h-Fenster)
       if (interaction.commandName === "vote") {
         await ensureWindowActive(guildId);
 
@@ -293,7 +293,7 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    // Modal: Item eingegeben -> Auswahlmenü
+    // Modal: Item eingegeben -> Auswahlmenü (jetzt GENAU EIN Grund)
     if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
       const item = interaction.fields.getTextInputValue("itemName");
       const guildId = interaction.guildId;
@@ -302,44 +302,43 @@ client.on("interactionCreate", async (interaction) => {
 
       const select = new StringSelectMenuBuilder()
         .setCustomId(`voteType:${item}`)
-        .setPlaceholder("Wähle Grund/Gründe (min. 1)")
+        .setPlaceholder("Wähle GENAU EINEN Grund")
         .addOptions(
           { label: "Gear",  value: "gear"  },
           { label: "Trait", value: "trait" },
           { label: "Litho", value: "litho" }
         )
-        .setMinValues(1).setMaxValues(3);
+        .setMinValues(1).setMaxValues(1); // <<< Änderung: maximal 1 Grund
 
       const row = new ActionRowBuilder().addComponents(select);
       return interaction.reply({
-        content: `Item: **${item}** – wähle Grund/Gründe:`,
+        content: `Item: **${item}** – wähle deinen Grund:`,
         components: [row],
         ephemeral: true
       });
     }
 
-    // Auswahl geklickt -> Votes speichern
+    // Auswahl geklickt -> Vote speichern
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
       const item = interaction.customId.split(":")[1];
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
 
-      // Wenn das Fenster zwischen Modal & Auswahl ablief, sofort wipen & abbrechen
       if (!(await windowStillActive(guildId))) {
         clearWipeTimer(guildId);
         await wipeGuildVotes(guildId);
         return interaction.update({ content: "⏱️ Das 48h-Fenster ist vorbei. Starte mit einem neuen `/vote` neu.", components: [] });
       }
 
-      let lines = [];
-      for (const t of interaction.values) {
-        const { isNew, value } = await addVoteIfNew(guildId, item, t, userId);
-        if (isNew) lines.push(`✔️ **${t.toUpperCase()}** gezählt → **${value}**`);
-        else       lines.push(`⚠️ **${t.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`);
-      }
+      // Da max 1 Wert gewählt werden kann, nehmen wir values[0]
+      const chosen = interaction.values[0];
+      const { isNew, value } = await addVoteIfNew(guildId, item, chosen, userId);
+      const line = isNew
+        ? `✔️ **${chosen.toUpperCase()}** gezählt → **${value}**`
+        : `⚠️ **${chosen.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`;
 
       const summary = await showVotes(guildId, item);
-      return interaction.update({ content: `${lines.join("\n")}\n\n${summary}`, components: [] });
+      return interaction.update({ content: `${line}\n\n${summary}`, components: [] });
     }
   } catch (e) {
     console.error(e);
