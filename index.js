@@ -1,27 +1,29 @@
+// index.js
 import {
   Client, GatewayIntentBits, Partials,
   REST, Routes, SlashCommandBuilder,
   ActionRowBuilder, StringSelectMenuBuilder,
-  ModalBuilder, TextInputBuilder, TextInputStyle
+  ModalBuilder, TextInputBuilder, TextInputStyle,
+  PermissionFlagsBits
 } from "discord.js";
 import pkg from "pg";
 const { Pool } = pkg;
 
-/** ====== ENV ====== */
+/* ===== ENV ===== */
 const TOKEN = process.env.TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 const CLIENT_ID = process.env.CLIENT_ID || "";
-const GUILD_ID  = process.env.GUILD_ID  || "";
+const GUILD_ID = process.env.GUILD_ID || "";
 if (!TOKEN || !DATABASE_URL) {
   console.error("Fehlende ENV: TOKEN und/oder DATABASE_URL");
   process.exit(1);
 }
 
-/** ====== KONSTANTEN ====== */
-const WINDOW_MS = 48 * 60 * 60 * 1000;
-const guildTimers = new Map();
+/* ===== KONSTANTEN ===== */
+const WINDOW_MS = 48 * 60 * 60 * 1000; // 48h
+const guildTimers = new Map(); // guildId -> Timeout
 
-/** ====== DB ====== */
+/* ===== DB ===== */
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 async function initDB() {
@@ -49,7 +51,7 @@ function slugify(s) {
   return s.toLowerCase().trim().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "");
 }
 
-/** ====== Fenster / Auto-Wipe ====== */
+/* ===== Fenster / Auto-Wipe (einmalig) ===== */
 async function getWindowEnd(guildId) {
   const { rows } = await pool.query(
     `SELECT window_end_at FROM settings WHERE guild_id=$1`,
@@ -85,7 +87,7 @@ function clearWipeTimer(guildId) {
 async function scheduleWipeIfNeeded(guildId) {
   clearWipeTimer(guildId);
   const end = await getWindowEnd(guildId);
-  if (!end) return;
+  if (!end) return; // kein aktives Fenster
 
   const msLeft = end.getTime() - Date.now();
   if (msLeft <= 0) {
@@ -113,7 +115,7 @@ async function windowStillActive(guildId) {
   return !!end && end.getTime() > Date.now();
 }
 
-/** ====== Votes ====== */
+/* ===== Votes ===== */
 async function addVoteIfNew(guildId, itemName, type, userId) {
   const t = type.toLowerCase();
   if (!["gear","trait","litho"].includes(t)) throw new Error("Ungültiger Grund");
@@ -179,13 +181,13 @@ async function showVotes(guildId, itemName) {
   }
 }
 
-/** ====== Discord Client ====== */
+/* ===== Discord Client ===== */
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
   partials: [Partials.Channel]
 });
 
-// Slash-Commands registrieren
+/* ===== Slash-Commands registrieren ===== */
 async function registerSlash() {
   if (!CLIENT_ID) return;
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -220,14 +222,66 @@ client.once("ready", async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await initDB();
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e.message); }
+
+  // Beim Start: evtl. laufendes Fenster reaktivieren
+  const { rows } = await pool.query(`SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`);
+  for (const r of rows) {
+    const end = new Date(r.window_end_at);
+    if (end.getTime() <= Date.now()) {
+      await wipeGuildVotes(r.guild_id);
+    } else {
+      const msLeft = end.getTime() - Date.now();
+      const timer = setTimeout(async () => {
+        try { await wipeGuildVotes(r.guild_id); }
+        finally { guildTimers.delete(r.guild_id); }
+      }, msLeft);
+      guildTimers.set(r.guild_id, timer);
+    }
+  }
 });
 
-// Interactions
+/* ===== Interactions ===== */
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
       const guildId = interaction.guildId;
 
+      // /vote -> Modal öffnen (startet bei Bedarf das 48h-Fenster)
+      if (interaction.commandName === "vote") {
+        await ensureWindowActive(guildId);
+
+        const modal = new ModalBuilder()
+          .setCustomId("voteItemModal")
+          .setTitle("Vote abgeben");
+        const itemInput = new TextInputBuilder()
+          .setCustomId("itemName")
+          .setLabel("Item-Name")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder("z. B. Schwert");
+        modal.addComponents(new ActionRowBuilder().addComponents(itemInput));
+        return interaction.showModal(modal);
+      }
+
+      // /vote-show -> Übersicht
+      if (interaction.commandName === "vote-show") {
+        const item = interaction.options.getString("item") || null;
+        const out = await showVotes(guildId, item);
+        return interaction.reply({ content: out, ephemeral: false });
+      }
+
+      // /vote-clear -> alle Votes löschen (Mods)
+      if (interaction.commandName === "vote-clear") {
+        const perms = interaction.memberPermissions;
+        if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
+          return interaction.reply({ content: "Nur Moderation darf das.", ephemeral: true });
+        }
+        clearWipeTimer(guildId);
+        await wipeGuildVotes(guildId);
+        return interaction.reply({ content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.", ephemeral: false });
+      }
+
+      // /vote-remove -> eigene Votes für ein Item löschen
       if (interaction.commandName === "vote-remove") {
         const item = interaction.options.getString("item");
         const removed = await removeUserVotes(guildId, item, interaction.user.id);
@@ -238,10 +292,59 @@ client.on("interactionCreate", async (interaction) => {
         }
       }
     }
+
+    // Modal: Item eingegeben -> Auswahlmenü
+    if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
+      const item = interaction.fields.getTextInputValue("itemName");
+      const guildId = interaction.guildId;
+
+      await ensureWindowActive(guildId);
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId(`voteType:${item}`)
+        .setPlaceholder("Wähle Grund/Gründe (min. 1)")
+        .addOptions(
+          { label: "Gear",  value: "gear"  },
+          { label: "Trait", value: "trait" },
+          { label: "Litho", value: "litho" }
+        )
+        .setMinValues(1).setMaxValues(3);
+
+      const row = new ActionRowBuilder().addComponents(select);
+      return interaction.reply({
+        content: `Item: **${item}** – wähle Grund/Gründe:`,
+        components: [row],
+        ephemeral: true
+      });
+    }
+
+    // Auswahl geklickt -> Votes speichern
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
+      const item = interaction.customId.split(":")[1];
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+
+      // Wenn das Fenster zwischen Modal & Auswahl ablief, sofort wipen & abbrechen
+      if (!(await windowStillActive(guildId))) {
+        clearWipeTimer(guildId);
+        await wipeGuildVotes(guildId);
+        return interaction.update({ content: "⏱️ Das 48h-Fenster ist vorbei. Starte mit einem neuen `/vote` neu.", components: [] });
+      }
+
+      let lines = [];
+      for (const t of interaction.values) {
+        const { isNew, value } = await addVoteIfNew(guildId, item, t, userId);
+        if (isNew) lines.push(`✔️ **${t.toUpperCase()}** gezählt → **${value}**`);
+        else       lines.push(`⚠️ **${t.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`);
+      }
+
+      const summary = await showVotes(guildId, item);
+      return interaction.update({ content: `${lines.join("\n")}\n\n${summary}`, components: [] });
+    }
   } catch (e) {
     console.error(e);
     if (interaction.isRepliable()) {
-      return interaction.reply({ content: "Da ist was schiefgelaufen.", ephemeral: true });
+      try { return interaction.reply({ content: "Da ist was schiefgelaufen.", ephemeral: true }); } catch (_) {}
     }
   }
 });
