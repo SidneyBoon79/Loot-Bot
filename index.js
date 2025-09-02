@@ -348,7 +348,9 @@ async function rollForItem(guild, guildId, itemInput) {
       [guildId, slug, winner.userId, windowEnd.toISOString()]
     );
   }
-
+  // Für die Anzeige: neue Wins (altes +1)
+  winner.wins = winner.wins + 1;
+  
   return { displayItemName: displayName, winner, lines };
 }
 
