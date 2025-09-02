@@ -4,13 +4,13 @@
 // Node >=18 (fetch vorhanden). ESM-Datei.
 
 const {
-  DISCORD_TOKEN: BOT_TOKEN,
+  BOT_TOKEN,     // <<< konsistent zu server.mjs
   CLIENT_ID,
-  GUILD_ID, // empfohlen für schnelle Sichtbarkeit
+  GUILD_ID,      // empfohlen für schnelle Sichtbarkeit
 } = process.env;
 
 if (!BOT_TOKEN || !CLIENT_ID) {
-  console.error("❌ ENV fehlt: DISCORD_TOKEN und/oder CLIENT_ID");
+  console.error("❌ ENV fehlt: BOT_TOKEN und/oder CLIENT_ID");
   process.exit(1);
 }
 
@@ -49,18 +49,18 @@ const commands = [
         name: "grund",
         description: "Grund deiner Stimme",
         required: true,
+        // WICHTIG: Werte müssen zu commands/*.mjs passen: gear/trait/litho
         choices: [
-          { name: "⚔️ Bedarf", value: "need" },
-          { name: "💠 Gear", value: "gear" },
-          { name: "📜 Orga", value: "org" },
+          { name: "⚔️ Gear",  value: "gear"  },
+          { name: "💠 Trait", value: "trait" },
+          { name: "📜 Litho", value: "litho" },
         ],
       },
     ],
   },
   {
     name: "vote-remove",
-    description:
-      "Entfernt deine Stimme zu einem Item (kein Überschreiben per /vote).",
+    description: "Entfernt deine Stimme zu einem Item (kein Überschreiben per /vote).",
     type: 1,
     dm_permission: false,
     options: [
@@ -74,8 +74,7 @@ const commands = [
   },
   {
     name: "vote-show",
-    description:
-      "Zeigt alle gültigen Votes der letzten 48h (öffentlich, mit ✅/🟡).",
+    description: "Zeigt alle gültigen Votes der letzten 48h (öffentlich, mit ✅/🟡).",
     type: 1,
     dm_permission: false,
   },
@@ -83,32 +82,29 @@ const commands = [
   // --- Rollen & Gewinner (Mod-Only) ---
   {
     name: "roll",
-    description:
-      "Rollt ein einzelnes Item (Dropdown-Auswahl; Ergebnis öffentlich).",
+    description: "Rollt ein einzelnes Item (Dropdown-Auswahl; Ergebnis öffentlich).",
     type: 1,
     dm_permission: false,
     default_member_permissions: MOD_PERMS,
+    // keine Options → Server bietet Dropdown oder nutzt item:<Name>
   },
   {
     name: "roll-all",
-    description:
-      "Rollt alle Items mit gültigen 48h-Votes (Ergebnisse öffentlich).",
+    description: "Rollt alle Items mit gültigen 48h-Votes (Ergebnisse öffentlich).",
     type: 1,
     dm_permission: false,
     default_member_permissions: MOD_PERMS,
   },
   {
     name: "winner",
-    description:
-      "Listet kompakt alle Gewinne der letzten 48h (Mod-Only, ohne Emojis).",
+    description: "Listet kompakt alle Gewinne der letzten 48h (Mod-Only, ohne Emojis).",
     type: 1,
     dm_permission: false,
     default_member_permissions: MOD_PERMS,
   },
   {
     name: "reducew",
-    description:
-      "Reduziert die Win-Zahl einer Person (nie unter 0; ephemer bestätigt).",
+    description: "Reduziert die Win-Zahl einer Person (nie unter 0; ephemer bestätigt).",
     type: 1,
     dm_permission: false,
     default_member_permissions: MOD_PERMS,
@@ -130,8 +126,7 @@ const commands = [
   },
   {
     name: "vote-clear",
-    description:
-      "Löscht Votes/Items/Wins (Cleanup) – nur wenn du’s wirklich willst.",
+    description: "Löscht Votes/Items/Wins (Cleanup) – nur wenn du’s wirklich willst.",
     type: 1,
     dm_permission: false,
     default_member_permissions: MOD_PERMS,
