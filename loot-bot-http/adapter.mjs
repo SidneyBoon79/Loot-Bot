@@ -3,15 +3,14 @@
 // Context-Objekt (ctx) enthält: guildId, userId, options, reply(), followUp(), db (pg Pool), usw.
 
 export async function voteInfo(ctx) {
-  const content =
-`# Loot-Bot – Kurz-Tutorial
+  const content = `# Loot-Bot – Kurz-Tutorial
 
-## 🔰 Für alle User
+## 🌿 Für alle User
 - **/vote** – Item + Grund abgeben (Gründe: ⚔️ Gear > 💠 Trait > 📜 Litho)
 - **/vote-show** – Aktuelle Votes (Fenster 48h ab dem **ersten** Vote)
 - **/vote-remove** – Eigenen Vote für ein Item löschen
 
-## 🧮 Fairness
+## 📏 Fairness
 Sortierung bei Rolls: **Grund** > **Wins (letzte 48h)** > **Wurfzahl**.
 
 ## 🎲 Auslosung
@@ -21,14 +20,14 @@ Sortierung bei Rolls: **Grund** > **Wins (letzte 48h)** > **Wurfzahl**.
 ## 🏆 Gewinnerliste
 - **/winner** – Listet Gewinner kompakt (nur für Mods gedacht)
 
-## 🧰 Admin/Mods
+## 🛠️ Admin/Mods
 - **/vote-clear** – Reset (Votes, Items, Wins)
 - **/reducew** – Wins reduzieren (User auswählen + Anzahl)
-
-*Diese Antwort ist ephemer (nur du siehst sie).*`;
+`;
 
   await ctx.reply(content, { ephemeral: true });
 }
+
 
 export async function vote(ctx) {
   // TODO: hier deine echte Vote-Logik einhängen (DB insert, Fenster-Start, etc.)
