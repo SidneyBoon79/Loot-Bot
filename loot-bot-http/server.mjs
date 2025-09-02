@@ -1,4 +1,4 @@
-// server.mjs — HTTP Interactions (Dropdowns, Modals, Bestätigungs-Buttons)
+// server.mjs — HTTP Interactions (Dropdowns, Modals, Bestätigungs-Buttons) + Member-Name-Cache
 import express from "express";
 import di from "discord-interactions";
 import { REST, Routes } from "discord.js";
@@ -33,6 +33,40 @@ const implemented = new Set([
   "vote","vote-show","vote-remove","vote-clear","vote-info",
   "roll","reroll","roll-all","winner","reducew"
 ]);
+
+// ---------- Schema & Helpers ----------
+async function ensureSchema(db) {
+  // Cache für Anzeigenamen – idempotent, kein Breaking-Change
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS members (
+      guild_id    TEXT NOT NULL,
+      user_id     TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, user_id)
+    );
+  `);
+}
+
+function displayNameFromInteraction(i) {
+  // beste verfügbare Anzeige – Nick > global_name > username > user_id
+  const nick   = i?.member?.nick;
+  const gn     = i?.member?.user?.global_name;
+  const uname  = i?.member?.user?.username;
+  const uid    = i?.member?.user?.id || i?.user?.id || "";
+  return (nick || gn || uname || uid || "").toString();
+}
+
+async function upsertMember(db, guildId, userId, name) {
+  if (!guildId || !userId || !name) return;
+  await db.query(
+    `INSERT INTO members (guild_id, user_id, display_name, updated_at)
+     VALUES ($1,$2,$3,NOW())
+     ON CONFLICT (guild_id,user_id)
+     DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = NOW()`,
+    [guildId, userId, name]
+  );
+}
 
 function makeCtx({ interaction, res }) {
   const guildId = interaction.guild_id || null;
@@ -77,17 +111,24 @@ function ub64url(s){ return Buffer.from(s.replace(/-/g,"+").replace(/_/g,"/")+"=
 const app = express();
 app.get("/", (_req, res) => res.status(200).send("ok"));
 
+// Ensure schema on boot
+ensureSchema(pool).catch(err => console.error("ensureSchema error:", err));
+
 app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
   try {
     const i = req.body;
 
     if (i.type === InteractionType.PING) return res.send({ type: InteractionResponseType.PONG });
 
-    if (i.type === InteractionType.APPLICATION_COMMAND) {
-      const name = i.data?.name;
-      const ctx  = makeCtx({ interaction: i, res });
+    // ctx + Member-Cache
+    const ctx  = makeCtx({ interaction: i, res });
+    const name = displayNameFromInteraction(i);
+    await upsertMember(ctx.db, ctx.guildId, ctx.userId, name);
 
-      switch (name) {
+    if (i.type === InteractionType.APPLICATION_COMMAND) {
+      const nameCmd = i.data?.name;
+
+      switch (nameCmd) {
         case "vote": {
           const modal = cmdVote.makeVoteModal();
           return res.send({ type: InteractionResponseType.MODAL, data: modal });
@@ -133,14 +174,13 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
         case "reducew":    return cmdReduceW.run(ctx);
 
         default:
-          if (!implemented.has(name)) return ctx.reply(`\`/${name}\` ist noch nicht migriert – kommt gleich.`, { ephemeral: true });
+          if (!implemented.has(nameCmd)) return ctx.reply(`\`/${nameCmd}\` ist noch nicht migriert – kommt gleich.`, { ephemeral: true });
           return ctx.reply("Unbekannter Command.", { ephemeral: true });
       }
     }
 
     if (i.type === InteractionType.MESSAGE_COMPONENT) {
       const customId = i.data?.custom_id || "";
-      const ctx = makeCtx({ interaction: i, res });
 
       // /roll Auswahl
       if (customId === "roll:select") {
@@ -167,12 +207,10 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
         const slug = ub64url(enc);
 
         if (kind === "confirm_yes") {
-          // ⚠️ wichtig: public defer, damit das Ergebnis NICHT ephemer ist
-          await ctx.defer({ ephemeral: false });
+          await ctx.defer({ ephemeral: false }); // Ergebnis öffentlich
           try { await cmdReroll.execute(ctx, slug); }
           catch (e) { await ctx.followUp(`❌ ${e.message || "Fehler beim Re-Roll"}`, { ephemeral: true }); }
         } else {
-          // kein Defer -> reine ephemere Kurzmeldung
           return ctx.reply("Re-Roll abgebrochen.", { ephemeral: true });
         }
         return;
@@ -212,8 +250,6 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
     }
 
     if (i.type === InteractionType.MODAL_SUBMIT) {
-      const ctx = makeCtx({ interaction: i, res });
-
       if (i.data?.custom_id === "vote:modal") {
         return cmdVote.handleModalSubmit(ctx);
       }
