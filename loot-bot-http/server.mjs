@@ -153,24 +153,27 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
         return;
       }
 
-      // /reroll Auswahl → Bestätigung
+      // /reroll Auswahl → Bestätigung (ephemer)
       if (customId === "reroll:select") {
         ctx.requireMod?.();
         const selectedSlug = i.data?.values?.[0];
         return cmdReroll.confirm(ctx, selectedSlug);
       }
 
-      // /reroll Buttons (Ja/Nein)
+      // /reroll Buttons (Ja = public, Nein = ephemer)
       if (customId.startsWith("reroll:confirm_")) {
         ctx.requireMod?.();
         const [, kind, enc] = customId.split(":"); // confirm_yes / confirm_no
         const slug = ub64url(enc);
-        await ctx.defer({ ephemeral: true });
+
         if (kind === "confirm_yes") {
+          // ⚠️ wichtig: public defer, damit das Ergebnis NICHT ephemer ist
+          await ctx.defer({ ephemeral: false });
           try { await cmdReroll.execute(ctx, slug); }
           catch (e) { await ctx.followUp(`❌ ${e.message || "Fehler beim Re-Roll"}`, { ephemeral: true }); }
         } else {
-          await ctx.followUp("Re-Roll abgebrochen.", { ephemeral: true });
+          // kein Defer -> reine ephemere Kurzmeldung
+          return ctx.reply("Re-Roll abgebrochen.", { ephemeral: true });
         }
         return;
       }
