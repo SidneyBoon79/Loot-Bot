@@ -1,4 +1,5 @@
-// index.js — Votes + Roll + Fairness + /vote-info (clean schema; Sort: Grund > Wins(48h) > Roll)
+// index.js — Votes + Roll + Fairness + /vote-info (ephemeral) + /reducew (Mods)
+// Sortierung: Grund > Wins(48h) > Roll
 
 import {
   Client, GatewayIntentBits, Partials,
@@ -22,14 +23,13 @@ if (!TOKEN || !DATABASE_URL) {
 
 /* ===== CONSTANTS ===== */
 const WINDOW_MS = 48 * 60 * 60 * 1000; // 48h
-const REASON_WEIGHT = { gear: 3, trait: 2, litho: 1 }; // Sort-Priorität
+const REASON_WEIGHT = { gear: 3, trait: 2, litho: 1 };
 const guildTimers = new Map();
 
 /* ===== DB ===== */
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 async function initDB() {
-  // Votes (nutzt item_name_first)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS votes (
       id SERIAL PRIMARY KEY,
@@ -43,7 +43,6 @@ async function initDB() {
     );
   `);
 
-  // Items (kanonischer Erstname)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
       guild_id TEXT NOT NULL,
@@ -55,7 +54,6 @@ async function initDB() {
   await pool.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS item_name_first TEXT;`);
   await pool.query(`UPDATE items SET item_name_first = item_slug WHERE item_name_first IS NULL;`);
 
-  // Settings (Fensterende)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       guild_id TEXT PRIMARY KEY,
@@ -63,7 +61,6 @@ async function initDB() {
     );
   `);
 
-  // Winners (für Fairness-Sortierung nach Wins im aktuellen Fenster)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS winners (
       id SERIAL PRIMARY KEY,
@@ -249,7 +246,7 @@ async function showVotes(guildId, itemNameInput) {
   }
 }
 
-/* ===== Fairness: Wins im aktuellen 48h-Fenster ===== */
+/* ===== Fairness (Wins im aktuellen Fenster) ===== */
 async function countWinsInCurrentWindow(guildId, userId) {
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS wins
@@ -283,16 +280,12 @@ function buildRankingLines(sorted) {
 }
 
 /**
- * /roll-Logik:
- * - pro User bester Grund (Gear > Trait > Litho)
- * - 1 Roll (1..100)
- * - Sort: Grund (desc) > Wins im Fenster (asc) > Roll (desc)
- * - Sieger wird in winners gespeichert (mit aktuellem window_end_at)
+ * /roll: Sortierung Grund > Wins(asc) > Roll(desc).
+ * Speichert den Sieger in winners und zeigt sofort die neue Win-Zahl.
  */
 async function rollForItem(guild, guildId, itemInput) {
   const { slug, displayName } = await ensureCanonicalItem(guildId, itemInput);
 
-  // alle Voter holen + besten Grund je User bestimmen (per Aggregation)
   const { rows } = await pool.query(
     `
       SELECT user_id,
@@ -308,7 +301,6 @@ async function rollForItem(guild, guildId, itemInput) {
   );
   if (rows.length === 0) return { displayItemName: displayName, winner: null, lines: null };
 
-  // resolve: reason, displayName, roll, wins
   const resolved = [];
   for (const r of rows) {
     let type = "litho";
@@ -329,7 +321,6 @@ async function rollForItem(guild, guildId, itemInput) {
     resolved.push({ userId: r.user_id, type, displayName: displayNameU, roll, wins });
   }
 
-  // Sort: Grund > Wins(asc) > Roll(desc)
   resolved.sort((a, b) => {
     const byReason = (REASON_WEIGHT[b.type] ?? 0) - (REASON_WEIGHT[a.type] ?? 0);
     if (byReason !== 0) return byReason;
@@ -341,7 +332,6 @@ async function rollForItem(guild, guildId, itemInput) {
   const lines = buildRankingLines(resolved);
   const winner = resolved[0];
 
-  // Sieger speichern mit aktuellem Fensterende
   const windowEnd = await getWindowEnd(guildId);
   if (windowEnd) {
     await pool.query(
@@ -349,7 +339,6 @@ async function rollForItem(guild, guildId, itemInput) {
        VALUES ($1,$2,$3,$4)`,
       [guildId, slug, winner.userId, windowEnd.toISOString()]
     );
-    // Für die Anzeige direkt auf den neuen Wert erhöhen
     winner.wins = (winner.wins || 0) + 1;
   }
 
@@ -365,7 +354,7 @@ function getVoteInfoEmbeds() {
         "Ihr könnt für **Items** abstimmen (mit **einem Grund**) und später lost der Bot das Item fair aus.",
         "",
         "**Gründe (Wertigkeit):** ⚔️ Gear > 💠 Trait > 📜 Litho",
-        "_Diese Reihenfolge ist immer wichtiger als die Würfelzahl._",
+        "_Diese Reihenfolge ist wichtiger als die Würfelzahl._",
         "",
         "### 48-Stunden-Fenster",
         "Sobald jemand das erste Mal `/vote` nutzt, startet ein **48h-Fenster**.",
@@ -386,13 +375,7 @@ function getVoteInfoEmbeds() {
         "Ein Mod startet `/roll <Item>`. Der Bot würfelt 1–100 und sortiert so:",
         "1) **Grund** (⚔️ > 💠 > 📜)",
         "2) **Gewinne im aktuellen 48h-Fenster** (weniger Wins = besser)",
-        "3) **Würfelzahl** (höher ist besser)",
-        "",
-        "**Beispiel**:",
-        "🎲 Würfelrunde für Schwert",
-        "🥇 Max — 40 (⚔️ Gear | 0W)",
-        "🥈 Lisa — 88 (💠 Trait | 1W)",
-        "🏆 Gewinner: Max (⚔️ Gear | 1W)"
+        "3) **Würfelzahl** (höher ist besser)"
       ].join("\n")
     );
 
@@ -410,19 +393,63 @@ function getVoteInfoEmbeds() {
     .setTitle("🛡️ Für Mods")
     .setDescription(
       [
-        "• **`/roll <Item>`** – lost aus (zeigt Gewinner **mit neuer Win-Zahl** `| XW`).",
-        "• **`/vote-clear`** – Hard Reset: löscht **Votes, Items und Winners**. Nächstes `/vote` startet neues 48h-Fenster.",
-        "• **`/vote-show [item]`** – Übersicht.",
-        "",
-        "**Best Practices**",
-        "• Genau **ein Grund** pro Vote.",
-        "• Transparenz: vor dem Roll eine `/vote-show` posten.",
-        "",
-
+        "• **`/roll <Item>`** – lost aus (Zeigt Gewinner **mit neuer Win-Zahl** `| XW`).",
+        "• **`/reducew`** – **Wins eines Users verringern** (Dropdown + Anzahl), Antwort nur für dich.",
+        "• **`/vote-clear`** – Hard Reset: löscht **Votes, Items und Winners**.",
+        "• **`/vote-show [item]`** – Übersicht."
       ].join("\n")
     );
 
-  return [e1, e2, e3, e4];
+  const e5 = new EmbedBuilder()
+    .setTitle("⚙️ Unter der Haube")
+    .setDescription(
+      [
+        "• **Kanonischer Name**: erster Item-Name wird gespeichert.",
+        "• **Fairness**: Sortierung bevorzugt weniger Wins im aktuellen Fenster.",
+        "• **Auto-Reset**: Nach 48h werden Votes, Items & Winners automatisch geleert."
+      ].join("\n")
+    );
+
+  return [e1, e2, e3, e4, e5];
+}
+
+/* ===== Reduce Wins (Mods): /reducew ===== */
+// Helper: aktuelle Winner-User (distinct) + Win-Count
+async function getCurrentWinnerUsers(guild, guildId) {
+  const { rows } = await pool.query(
+    `SELECT user_id, COUNT(*)::int AS wins
+       FROM winners
+      WHERE guild_id=$1 AND NOW() < window_end_at
+   GROUP BY user_id
+   ORDER BY wins DESC, user_id`,
+    [guildId]
+  );
+  const list = [];
+  for (const r of rows) {
+    let name = `<@${r.user_id}>`;
+    try {
+      const m = await guild.members.fetch(r.user_id);
+      name = m?.displayName || m?.user?.username || name;
+    } catch {}
+    list.push({ userId: r.user_id, name, wins: r.wins });
+  }
+  return list;
+}
+
+// Helper: Wins reduzieren (löscht jüngste Einträge zuerst)
+async function reduceWins(guildId, userId, amount) {
+  const { rows } = await pool.query(
+    `WITH del AS (
+       SELECT id FROM winners
+        WHERE guild_id=$1 AND user_id=$2 AND NOW() < window_end_at
+     ORDER BY won_at DESC
+        LIMIT $3
+     )
+     DELETE FROM winners WHERE id IN (SELECT id FROM del)
+     RETURNING id`,
+    [guildId, userId, amount]
+  );
+  return rows.length; // tatsächlich entfernt
 }
 
 /* ===== Discord Client ===== */
@@ -457,7 +484,11 @@ async function registerSlash() {
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .toJSON(),
     new SlashCommandBuilder().setName("vote-info")
-      .setDescription("Zeigt das Kurz-Tutorial für User & Mods an.")
+      .setDescription("Zeigt das Kurz-Tutorial (nur für dich sichtbar).")
+      .toJSON(),
+    new SlashCommandBuilder().setName("reducew")
+      .setDescription("Wins eines Users im aktuellen Fenster reduzieren (Mods)")
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .toJSON()
   ];
 
@@ -497,6 +528,7 @@ client.once("ready", async () => {
 /* ===== Interactions ===== */
 client.on("interactionCreate", async (interaction) => {
   try {
+    // ===== Slash commands =====
     if (interaction.isChatInputCommand()) {
       const guild = interaction.guild;
       const guildId = interaction.guildId;
@@ -504,7 +536,6 @@ client.on("interactionCreate", async (interaction) => {
       // /vote -> Modal öffnen
       if (interaction.commandName === "vote") {
         await ensureWindowActive(guildId);
-
         const modal = new ModalBuilder()
           .setCustomId("voteItemModal")
           .setTitle("Vote abgeben");
@@ -525,7 +556,7 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: out, ephemeral: false });
       }
 
-      // /vote-clear (Mods)
+      // /vote-clear
       if (interaction.commandName === "vote-clear") {
         const perms = interaction.memberPermissions;
         if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
@@ -566,14 +597,97 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ embeds: [embed] });
       }
 
-      // /vote-info
+      // /vote-info (nur für den Anfragenden)
       if (interaction.commandName === "vote-info") {
         const embeds = getVoteInfoEmbeds();
         return interaction.reply({ embeds, ephemeral: true });
       }
+
+      // /reducew (Mods): Dropdown + Modal, Antwort nur für Mod
+      if (interaction.commandName === "reducew") {
+        const perms = interaction.memberPermissions;
+        if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
+          return interaction.reply({ content: "Nur Moderation darf das.", ephemeral: true });
+        }
+
+        const winners = await getCurrentWinnerUsers(guild, guildId);
+        if (winners.length === 0) {
+          return interaction.reply({ content: "Keine Gewinner im aktuellen 48h-Fenster gefunden.", ephemeral: true });
+        }
+
+        // Discord Select hat max. 25 Optionen – wir nehmen die Top 25 nach Wins
+        const options = winners.slice(0, 25).map(w => ({
+          label: `${w.name} | ${w.wins}W`,
+          value: w.userId
+        }));
+
+        const select = new StringSelectMenuBuilder()
+          .setCustomId("reduceW:select")
+          .setPlaceholder("Wähle den User, dessen Wins reduziert werden sollen")
+          .addOptions(...options)
+          .setMinValues(1)
+          .setMaxValues(1);
+
+        const row = new ActionRowBuilder().addComponents(select);
+
+        return interaction.reply({
+          content: "Wähle den User aus der Gewinnerliste:",
+          components: [row],
+          ephemeral: true
+        });
+      }
     }
 
-    // Modal -> Auswahlmenü (genau ein Grund)
+    // ===== Select handler for /reducew =====
+    if (interaction.isStringSelectMenu() && interaction.customId === "reduceW:select") {
+      const userId = interaction.values?.[0];
+      if (!userId) return interaction.update({ content: "Kein User gewählt.", components: [] });
+
+      // Modal für Anzahl
+      const modal = new ModalBuilder()
+        .setCustomId(`reduceW:modal:${userId}`)
+        .setTitle("Wins reduzieren");
+
+      const countInput = new TextInputBuilder()
+        .setCustomId("reduceCount")
+        .setLabel("Anzahl Wins abziehen (z. B. 1)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("1");
+
+      modal.addComponents(new ActionRowBuilder().addComponents(countInput));
+      return interaction.showModal(modal);
+    }
+
+    // ===== Modal submit for /reducew =====
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("reduceW:modal:")) {
+      const userId = interaction.customId.split(":")[2];
+      const guild = interaction.guild;
+      const guildId = interaction.guildId;
+
+      const raw = interaction.fields.getTextInputValue("reduceCount")?.trim();
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        return interaction.reply({ content: "Bitte eine **positive ganze Zahl** eingeben.", ephemeral: true });
+      }
+
+      const removed = await reduceWins(guildId, userId, parsed);
+      const newWins = await countWinsInCurrentWindow(guildId, userId);
+
+      // Namen hübsch anzeigen
+      let name = `<@${userId}>`;
+      try {
+        const m = await guild.members.fetch(userId);
+        name = m?.displayName || m?.user?.username || name;
+      } catch {}
+
+      return interaction.reply({
+        content: `✅ Reduziert: **${name}** – abgezogen: **${removed}** (angefordert: ${parsed}).\nNeuer Stand: **${newWins}W** im aktuellen 48h-Fenster.`,
+        ephemeral: true
+      });
+    }
+
+    // ===== Modal & Select: voting workflow =====
     if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
       const item = interaction.fields.getTextInputValue("itemName");
       const guildId = interaction.guildId;
@@ -598,7 +712,6 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // Auswahl -> Vote speichern
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
       const itemInput = interaction.customId.slice("voteType:".length);
       const guildId = interaction.guildId;
@@ -624,13 +737,16 @@ client.on("interactionCreate", async (interaction) => {
     console.error("Interaction error:", e);
     try {
       const msg = typeof e?.message === "string" ? e.message : "Unbekannter Fehler";
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: `Fehler: ${msg}`, ephemeral: true });
-      } else {
-        await interaction.reply({ content: `Fehler: ${msg}`, ephemeral: true });
+      if (interaction.isRepliable && interaction.isRepliable()) {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content: `Fehler: ${msg}`, ephemeral: true });
+        } else {
+          await interaction.reply({ content: `Fehler: ${msg}`, ephemeral: true });
+        }
       }
     } catch {}
   }
 });
 
+/* ===== Register + Login ===== */
 client.login(TOKEN);
