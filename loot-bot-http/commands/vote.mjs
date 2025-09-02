@@ -1,7 +1,7 @@
-
-// commands/vote.mjs
-// /vote – Item + Grund speichern (ohne Überschreiben!)
-// Wenn bereits ein Vote für (guild,user,item) existiert, wird abgelehnt und ein Hinweis auf /vote-remove gegeben.
+// commands/vote.mjs — Modal + Dropdown-Flow
+// /vote -> Modal("Item")
+// MODAL_SUBMIT -> ephemere Nachricht mit Dropdown (Gear/Trait/Litho)
+// MESSAGE_COMPONENT (vote:grund:<b64u(item)>) -> Vote speichern
 
 const VALID_REASONS = new Map([
   ["gear",  "⚔️ Gear"],
@@ -13,43 +13,96 @@ function normalizeItem(raw) {
   return (raw ?? "").trim().slice(0, 120);
 }
 
-function indexByName(options = []) {
-  const map = Object.create(null);
-  for (const o of options) map[o.name] = o;
-  return map;
+function asStringSelect(placeholder, customId, optionsArr) {
+  return {
+    type: 1, // Action Row
+    components: [
+      { type: 3, custom_id: customId, placeholder, min_values: 1, max_values: 1, options: optionsArr }
+    ]
+  };
 }
 
-export async function run(ctx) {
-  const opt = indexByName(ctx.options);
-  const itemRaw = opt.item?.value;
-  const reason  = (opt.grund?.value || "").toLowerCase();
+function b64uEncode(s) {
+  return Buffer.from(s, "utf8").toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
+function b64uDecode(s) {
+  s = s.replace(/-/g,"+").replace(/_/g,"/");
+  const pad = s.length % 4 ? 4 - (s.length % 4) : 0;
+  return Buffer.from(s + "=".repeat(pad), "base64").toString("utf8");
+}
 
-  // Validierung
-  if (!itemRaw) {
-    return ctx.reply("Bitte gib ein **Item** an, z. B. `/vote item:<Schwert> grund:Gear`.", { ephemeral: true });
-  }
-  if (!VALID_REASONS.has(reason)) {
-    const choices = Array.from(VALID_REASONS.values()).join(" / ");
-    return ctx.reply(`Ungültiger Grund. Erlaubt: ${choices}.`, { ephemeral: true });
-  }
+// ===== Public API =====
+export function makeVoteModal() {
+  return {
+    custom_id: "vote:modal",
+    title: "Vote abgeben",
+    components: [
+      {
+        type: 1, // Action Row
+        components: [
+          {
+            type: 4, // Text Input
+            custom_id: "vote:item",
+            style: 1, // Short
+            label: "Item (z. B. Schwert, Ring, Bogen …)",
+            placeholder: "Schwert der Abenddämmerung",
+            required: true,
+            max_length: 120
+          }
+        ]
+      }
+    ]
+  };
+}
 
-  const item = normalizeItem(itemRaw);
+export async function handleModalSubmit(ctx) {
+  // Item aus dem Modal lesen
+  const comps = ctx.interaction?.data?.components ?? [];
+  const firstRow = comps[0]?.components?.[0];
+  const rawItem = firstRow?.value ?? "";
+  const item = normalizeItem(rawItem);
+
   if (!item) {
-    return ctx.reply("Das Item darf nicht leer sein.", { ephemeral: true });
+    return ctx.reply("Bitte gib ein Item an.", { ephemeral: true });
   }
 
-  // DB-Schema sicherstellen (idempotent)
+  // Dropdown mit Gründen schicken (ephemer)
+  const encoded = b64uEncode(item);
+  const optionsArr = [
+    { label: "Gear (⚔️)",  value: "gear",  description: "Direktes Upgrade" },
+    { label: "Trait (💠)", value: "trait", description: "Build-Trait" },
+    { label: "Litho (📜)", value: "litho", description: "Rezept/Schrift" },
+  ];
+
+  return ctx.reply(
+    {
+      content: `Wähle den Grund für **${item}**:`,
+      components: [asStringSelect("Grund auswählen …", "vote:grund:" + encoded, optionsArr)]
+    },
+    { ephemeral: true }
+  );
+}
+
+export async function handleReasonSelect(ctx) {
+  // ctx enthält .item (vom server.mjs gesetzt) und .reason (Dropdown-Wert)
+  const item = normalizeItem(ctx.item);
+  const reason = (ctx.reason ?? "").trim();
+
+  if (!item) return ctx.reply("Item fehlt.", { ephemeral: true });
+  if (!VALID_REASONS.has(reason)) {
+    return ctx.reply("Ungültiger Grund.", { ephemeral: true });
+  }
+
   await ensureSchema(ctx.db);
 
-  // Prüfen, ob der User für dieses Item bereits einen Vote hat
+  // Doppelvote verhindern
   const check = await ctx.db.query(
-    `SELECT reason, created_at
+    `SELECT reason
        FROM votes
-      WHERE guild_id = $1 AND user_id = $2 AND item_name = $3
+      WHERE guild_id=$1 AND user_id=$2 AND item_name=$3
       LIMIT 1`,
     [ctx.guildId, ctx.userId, item]
   );
-
   if (check.rowCount > 0) {
     const existing = check.rows[0];
     const pretty = VALID_REASONS.get(existing.reason) || existing.reason;
@@ -60,66 +113,50 @@ export async function run(ctx) {
     );
   }
 
-  // Insert (ein neuer Vote)
-  try {
-    await ctx.db.query(
-      `INSERT INTO votes (guild_id, user_id, item_name, reason, created_at)
-       VALUES ($1, $2, $3, $4, NOW())`,
-      [ctx.guildId, ctx.userId, item, reason]
-    );
+  // Insert (neuer Vote)
+  await ctx.db.query(
+    `INSERT INTO votes (guild_id, user_id, item_name, reason, created_at)
+     VALUES ($1, $2, $3, $4, NOW())`,
+    [ctx.guildId, ctx.userId, item, reason]
+  );
 
-    // Item im Register anlegen (für Dropdowns/roll)
-    await ctx.db.query(
-      `INSERT INTO items (guild_id, item_name, rolled, created_at)
-       VALUES ($1, $2, FALSE, NOW())
-       ON CONFLICT (guild_id, item_name) DO NOTHING`,
-      [ctx.guildId, item]
-    );
+  // Item im Register anlegen (für Dropdowns/roll)
+  await ctx.db.query(
+    `INSERT INTO items (guild_id, item_name, rolled, created_at)
+     VALUES ($1, $2, FALSE, NOW())
+     ON CONFLICT (guild_id, item_name) DO NOTHING`,
+    [ctx.guildId, item]
+  );
 
-    const prettyReason = VALID_REASONS.get(reason);
-    return ctx.reply(
-      `✅ Vote gespeichert:\n` +
-      `• **Item:** ${item}\n` +
-      `• **Grund:** ${prettyReason}`,
-      { ephemeral: true }
-    );
-  } catch (err) {
-    // Falls race condition → Unique-Fehler (23505)
-    if (err?.code === "23505") {
-      return ctx.reply(
-        `Du hast bereits für **${item}** gevotet. Nutze \`/vote-remove item:${item}\`, um zu ändern.`,
-        { ephemeral: true }
-      );
-    }
-    console.error("vote error:", err);
-    return ctx.reply("❌ Konnte den Vote nicht speichern. Versuch’s später nochmal.", { ephemeral: true });
-  }
+  const prettyReason = VALID_REASONS.get(reason);
+  return ctx.reply(
+    `✅ Vote gespeichert:\n` +
+    `• **Item:** ${item}\n` +
+    `• **Grund:** ${prettyReason}`,
+    { ephemeral: true }
+  );
 }
 
+// ===== Schema =====
 async function ensureSchema(db) {
   await db.query(`
     CREATE TABLE IF NOT EXISTS votes (
-      id         BIGSERIAL PRIMARY KEY,
       guild_id   TEXT NOT NULL,
       user_id    TEXT NOT NULL,
       item_name  TEXT NOT NULL,
-      reason     TEXT NOT NULL CHECK (reason IN ('gear','trait','litho')),
+      reason     TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (guild_id, user_id, item_name)
+      PRIMARY KEY (guild_id, user_id, item_name)
     );
   `);
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS items (
-      id         BIGSERIAL PRIMARY KEY,
       guild_id   TEXT NOT NULL,
       item_name  TEXT NOT NULL,
       rolled     BOOLEAN NOT NULL DEFAULT FALSE,
-      winner_id  TEXT,
-      rolled_by  TEXT,
-      rolled_at  TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (guild_id, item_name)
+      PRIMARY KEY (guild_id, item_name)
     );
   `);
 
