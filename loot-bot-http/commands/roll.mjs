@@ -90,7 +90,7 @@ export async function run(ctx) {
 
   const winReason = RLABEL[winner.reason] || winner.reason;
   const header = `**Roll-Ergebnis für ${itemName}:**`;
-  const footer = `🏆 Gewinner: <@${winner.user_id}> — ${winReason} · Wurf ${fmt(winner.roll)} · neuer Stand: (W${fmt(newWins)})`;
+  const footer = `🏆 Gewinner: <@${winner.user_id}> — ${winReason} · Wurf ${fmt(winner.roll)} · (W${fmt(newWins)})`;
 
   const body = `${header}\n${lines.join("\n")}\n\n${footer}`;
 
