@@ -1,4 +1,4 @@
-// index.js
+// index.js (verbose + canonical names + exact-one reason)
 import {
   Client, GatewayIntentBits, Partials,
   REST, Routes, SlashCommandBuilder,
@@ -33,7 +33,7 @@ async function initDB() {
       id SERIAL PRIMARY KEY,
       guild_id   TEXT NOT NULL,
       item_slug  TEXT NOT NULL,
-      item_name  TEXT NOT NULL,       -- gespeicherter KANONISCHER Name
+      item_name  TEXT NOT NULL,
       type       TEXT NOT NULL CHECK (type IN ('gear','trait','litho')),
       user_id    TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -41,7 +41,7 @@ async function initDB() {
     );
   `);
 
-  // Kanonischer, erste Schreibweise je (guild,item_slug)
+  // Kanonischer (erste) Name
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
       guild_id TEXT NOT NULL,
@@ -51,7 +51,7 @@ async function initDB() {
     );
   `);
 
-  // Fenster-Ende
+  // Fenster-Ende-Zeitpunkt
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       guild_id TEXT PRIMARY KEY,
@@ -64,7 +64,7 @@ function slugify(s) {
   return s.toLowerCase().trim().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "");
 }
 
-/* ===== Fenster / Auto-Wipe (einmalig) ===== */
+/* ===== Fenster / Auto-Wipe ===== */
 async function getWindowEnd(guildId) {
   const { rows } = await pool.query(
     `SELECT window_end_at FROM settings WHERE guild_id=$1`,
@@ -100,7 +100,7 @@ function clearWipeTimer(guildId) {
 async function scheduleWipeIfNeeded(guildId) {
   clearWipeTimer(guildId);
   const end = await getWindowEnd(guildId);
-  if (!end) return; // kein aktives Fenster
+  if (!end) return;
 
   const msLeft = end.getTime() - Date.now();
   if (msLeft <= 0) {
@@ -109,6 +109,7 @@ async function scheduleWipeIfNeeded(guildId) {
   }
   const timer = setTimeout(async () => {
     try { await wipeGuildVotes(guildId); }
+    catch (e) { console.error("Timer wipe error:", e); }
     finally { guildTimers.delete(guildId); }
   }, msLeft);
   guildTimers.set(guildId, timer);
@@ -129,20 +130,15 @@ async function windowStillActive(guildId) {
 }
 
 /* ===== Items / Kanonischer Name ===== */
-// Sicherstellt, dass der erste Name festgeschrieben wird.
-// Gibt { slug, displayName } zurück (displayName = erste Schreibweise).
 async function ensureCanonicalItem(guildId, inputName) {
   const slug = slugify(inputName);
-
-  // Ersten Namen nur anlegen, falls noch nicht vorhanden
+  // nur anlegen, falls nicht vorhanden
   await pool.query(
     `INSERT INTO items (guild_id, item_slug, item_name_first)
      VALUES ($1,$2,$3)
      ON CONFLICT (guild_id, item_slug) DO NOTHING`,
     [guildId, slug, inputName]
   );
-
-  // Kanonischen Namen lesen
   const { rows } = await pool.query(
     `SELECT item_name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
     [guildId, slug]
@@ -153,9 +149,8 @@ async function ensureCanonicalItem(guildId, inputName) {
 
 /* ===== Votes ===== */
 async function addVoteIfNew(guildId, itemNameInput, type, userId) {
-  const t = type.toLowerCase();
+  const t = String(type || "").toLowerCase();
   if (!["gear","trait","litho"].includes(t)) throw new Error("Ungültiger Grund");
-
   const { slug, displayName } = await ensureCanonicalItem(guildId, itemNameInput);
 
   const res = await pool.query(
@@ -186,12 +181,11 @@ async function removeUserVotes(guildId, itemNameInput, userId) {
 async function showVotes(guildId, itemNameInput) {
   if (itemNameInput) {
     const { slug } = await ensureCanonicalItem(guildId, itemNameInput);
-    // Kanonischen Namen aus items holen + aggregieren
     const { rows } = await pool.query(
       `SELECT i.item_name_first AS item_name,
-              SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END)::int  AS gear,
-              SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END)::int  AS trait,
-              SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END)::int  AS litho
+              COALESCE(SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END),0)::int  AS gear,
+              COALESCE(SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END),0)::int  AS trait,
+              COALESCE(SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END),0)::int  AS litho
        FROM items i
        LEFT JOIN votes v
          ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
@@ -203,7 +197,6 @@ async function showVotes(guildId, itemNameInput) {
     const r = rows[0];
     return `**${r.item_name}**\n• Gear: **${r.gear}**\n• Trait: **${r.trait}**\n• Litho: **${r.litho}**`;
   } else {
-    // Gesamtliste: immer über items joinen, damit es keine Doppel-Anzeige durch Cases gibt
     const { rows } = await pool.query(
       `SELECT i.item_name_first AS item_name,
               COALESCE(SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END),0)::int  AS gear,
@@ -266,7 +259,7 @@ client.once("ready", async () => {
   await initDB();
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e.message); }
 
-  // Beim Start: evtl. laufendes Fenster reaktivieren
+  // evtl. laufendes Fenster reaktivieren
   const { rows } = await pool.query(`SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`);
   for (const r of rows) {
     const end = new Date(r.window_end_at);
@@ -276,6 +269,7 @@ client.once("ready", async () => {
       const msLeft = end.getTime() - Date.now();
       const timer = setTimeout(async () => {
         try { await wipeGuildVotes(r.guild_id); }
+        catch (e) { console.error("Timer wipe error:", e); }
         finally { guildTimers.delete(r.guild_id); }
       }, msLeft);
       guildTimers.set(r.guild_id, timer);
@@ -289,7 +283,6 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const guildId = interaction.guildId;
 
-      // /vote -> Modal öffnen (startet ggf. das 48h-Fenster)
       if (interaction.commandName === "vote") {
         await ensureWindowActive(guildId);
 
@@ -306,14 +299,12 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      // /vote-show -> Übersicht
       if (interaction.commandName === "vote-show") {
         const item = interaction.options.getString("item") || null;
         const out = await showVotes(guildId, item);
         return interaction.reply({ content: out, ephemeral: false });
       }
 
-      // /vote-clear -> alle Votes löschen (Mods)
       if (interaction.commandName === "vote-clear") {
         const perms = interaction.memberPermissions;
         if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
@@ -324,19 +315,18 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.", ephemeral: false });
       }
 
-      // /vote-remove -> eigene Votes für ein Item löschen
       if (interaction.commandName === "vote-remove") {
         const item = interaction.options.getString("item");
         const removed = await removeUserVotes(guildId, item, interaction.user.id);
-        if (removed > 0) {
-          return interaction.reply({ content: `✅ Deine Votes für **${item}** wurden entfernt.`, ephemeral: true });
-        } else {
-          return interaction.reply({ content: `⚠️ Du hattest keine Votes für **${item}**.`, ephemeral: true });
-        }
+        return interaction.reply({
+          content: removed > 0
+            ? `✅ Deine Votes für **${item}** wurden entfernt.`
+            : `⚠️ Du hattest keine Votes für **${item}**.`,
+          ephemeral: true
+        });
       }
     }
 
-    // Modal: Item eingegeben -> Auswahlmenü (GENAU EIN Grund)
     if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
       const item = interaction.fields.getTextInputValue("itemName");
       const guildId = interaction.guildId;
@@ -361,32 +351,45 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // Auswahl geklickt -> Vote speichern
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
-      const itemInput = interaction.customId.split(":")[1];
+      const itemInput = interaction.customId.slice("voteType:".length);
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
 
-      // Falls das Fenster abgelaufen ist → wipen & abbrechen
       if (!(await windowStillActive(guildId))) {
         clearWipeTimer(guildId);
         await wipeGuildVotes(guildId);
         return interaction.update({ content: "⏱️ Das 48h-Fenster ist vorbei. Starte mit einem neuen `/vote` neu.", components: [] });
       }
 
-      const chosen = interaction.values[0]; // max 1
-      const { isNew, value, displayName } = await addVoteIfNew(guildId, itemInput, chosen, userId);
-      const line = isNew
-        ? `✔️ **${chosen.toUpperCase()}** gezählt → **${value}**`
-        : `⚠️ **${chosen.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`;
+      const chosen = interaction.values?.[0];
+      if (!chosen) {
+        return interaction.update({ content: "Kein Grund gewählt.", components: [] });
+      }
 
-      const summary = await showVotes(guildId, displayName);
+      const result = await addVoteIfNew(guildId, itemInput, chosen, userId);
+      const line = result.isNew
+        ? `✔️ **${chosen.toUpperCase()}** gezählt → **${result.value}**`
+        : `⚠️ **${chosen.toUpperCase()}** bereits von dir gevotet. Aktuell: **${result.value}**`;
+
+      const summary = await showVotes(guildId, result.displayName);
       return interaction.update({ content: `${line}\n\n${summary}`, components: [] });
     }
   } catch (e) {
-    console.error(e);
+    console.error("Interaction error:", e);
     if (interaction.isRepliable()) {
-      try { return interaction.reply({ content: "Da ist was schiefgelaufen.", ephemeral: true }); } catch (_) {}
+      try {
+        const msg = typeof e?.message === "string" ? e.message : "Unbekannter Fehler";
+        return interaction.reply({ content: `Fehler: ${msg}`, ephemeral: true });
+      } catch {
+        // falls schon geantwortet wurde
+        try {
+          const msg = typeof e?.message === "string" ? e.message : "Unbekannter Fehler";
+          if (interaction.isMessageComponent()) {
+            return interaction.update({ content: `Fehler: ${msg}`, components: [] });
+          }
+        } catch {}
+      }
     }
   }
 });
