@@ -45,11 +45,10 @@ export async function run(ctx) {
     ]
   };
 
-  return ctx.reply({ content: "Wähle ein Item für den **Re-Roll**:", components: [select] }, { ephemeral: true });
+  return ctx.reply({ content: "Item für **Re-Roll** wählen:", components: [select] }, { ephemeral: true });
 }
 
 export async function confirm(ctx, itemSlug) {
-  // Name holen für Anzeige
   const meta = await ctx.db.query(
     `SELECT MAX(item_name_first) AS name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
     [ctx.guildId, itemSlug]
@@ -60,22 +59,28 @@ export async function confirm(ctx, itemSlug) {
   const buttons = {
     type: 1,
     components: [
-      { type: 2, style: 4, custom_id: `reroll:confirm_yes:${enc}`, label: "Ja, sicher!" },
+      { type: 2, style: 4, custom_id: `reroll:confirm_yes:${enc}`, label: "Re-Roll starten" },
       { type: 2, style: 2, custom_id: `reroll:confirm_no:${enc}`,  label: "Abbrechen" }
     ]
   };
 
-  return ctx.reply({ content: `Bist du *wirklich* sicher, dass du **${name}** erneut rollen willst?`, components: [buttons] }, { ephemeral: true });
+  // neutral formuliert, keine Anrede
+  return ctx.reply({ content: `Sicherheitsabfrage: **${name}** erneut rollen?`, components: [buttons] }, { ephemeral: true });
 }
 
 export async function execute(ctx, itemSlug) {
-  // Votes (48h) holen
-  const meta = await ctx.db.query(
-    `SELECT MAX(item_name_first) AS name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
+  // Namen + bisherigen Gewinner ermitteln
+  const metaQ = await ctx.db.query(
+    `SELECT MAX(item_name_first) AS name_first,
+            MAX(rolled_by)       AS old_winner
+       FROM items
+      WHERE guild_id=$1 AND item_slug=$2`,
     [ctx.guildId, itemSlug]
   );
-  const itemName = meta.rows[0]?.name_first || itemSlug;
+  const itemName  = metaQ.rows[0]?.name_first || itemSlug;
+  const oldWinner = metaQ.rows[0]?.old_winner || null;
 
+  // Votes (48h) holen
   const { rows: votes } = await ctx.db.query(
     `SELECT v.user_id, v.type,
             COALESCE(w.win_count,0) AS wins
@@ -91,6 +96,7 @@ export async function execute(ctx, itemSlug) {
     return ctx.followUp(`Für **${itemName}** gibt es keine gültigen Votes im 48h-Fenster.`, { ephemeral: true });
   }
 
+  // Ranking: Grund (⚔️>💠>📜) desc → Wins asc → Wurf desc
   const ranked = votes.map(v => ({
     user_id: v.user_id,
     reason:  v.type,
@@ -105,30 +111,57 @@ export async function execute(ctx, itemSlug) {
 
   const winner = ranked[0];
 
-  // Wins erhöhen & Item erneut markieren (Time + Winner)
-  await ctx.db.query(
-    `INSERT INTO wins (guild_id, user_id, win_count, updated_at)
-     VALUES ($1,$2,1,NOW())
-     ON CONFLICT (guild_id,user_id)
-     DO UPDATE SET win_count = wins.win_count + 1, updated_at = NOW()`,
-    [ctx.guildId, winner.user_id]
-  );
+  // === Wins-Korrektur ===
+  // Fall A: gleicher Gewinner -> keine Veränderung der Wins (nur Zeitstempel/rolled_by bleibt gleich)
+  // Fall B: anderer Gewinner -> altem −1 (min 0), neuem +1
+  if (!oldWinner || oldWinner === winner.user_id) {
+    // kein Umbuchen – aber wir aktualisieren den Timestamp und rolled_by (bleibt ggf. gleich)
+    await ctx.db.query(
+      `UPDATE items
+          SET rolled_at = NOW(),
+              rolled_by = $3,
+              rolled_manual = TRUE
+        WHERE guild_id=$1 AND item_slug=$2`,
+      [ctx.guildId, itemSlug, winner.user_id]
+    );
+  } else {
+    // altem Gewinner −1 (nicht negativ)
+    await ctx.db.query(
+      `UPDATE wins
+          SET win_count = GREATEST(win_count - 1, 0),
+              updated_at = NOW()
+        WHERE guild_id=$1 AND user_id=$2`,
+      [ctx.guildId, oldWinner]
+    );
 
-  await ctx.db.query(
-    `UPDATE items
-        SET rolled_at = NOW(),
-            rolled_by = $3,
-            rolled_manual = TRUE
-      WHERE guild_id=$1 AND item_slug=$2`,
-    [ctx.guildId, itemSlug, winner.user_id]
-  );
+    // neuem Gewinner +1 (upsert)
+    await ctx.db.query(
+      `INSERT INTO wins (guild_id, user_id, win_count, updated_at)
+       VALUES ($1,$2,1,NOW())
+       ON CONFLICT (guild_id,user_id)
+       DO UPDATE SET win_count = wins.win_count + 1, updated_at = NOW()`,
+      [ctx.guildId, winner.user_id]
+    );
 
+    // Item auf neuen Gewinner setzen
+    await ctx.db.query(
+      `UPDATE items
+          SET rolled_at = NOW(),
+              rolled_by = $3,
+              rolled_manual = TRUE
+        WHERE guild_id=$1 AND item_slug=$2`,
+      [ctx.guildId, itemSlug, winner.user_id]
+    );
+  }
+
+  // aktuellen Win-Stand des (neuen) Gewinners holen
   const w = await ctx.db.query(
     `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
     [ctx.guildId, winner.user_id]
   );
-  const newWins = w.rows[0]?.win_count ?? 1;
+  const newWins = w.rows[0]?.win_count ?? (oldWinner === winner.user_id ? winner.wins : 1);
 
+  // Ausgabe (öffentlich, unpersönlich), Top 3 mit 🥇/🥈/🥉
   const lines = ranked.slice(0, 15).map((r, idx) => {
     const marker = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : "—";
     const reason = RLABEL[r.reason] || r.reason;
@@ -139,5 +172,6 @@ export async function execute(ctx, itemSlug) {
   const footer = `🏆 Gewinner: <@${winner.user_id}> — ${RLABEL[winner.reason]} · Wurf ${fmt(winner.roll)} · (W${fmt(newWins)})`;
   const body = `${header}\n${lines.join("\n")}\n\n${footer}`;
 
+  // Öffentlich posten (nicht persönlich)
   return ctx.followUp(body, { ephemeral: false });
 }
