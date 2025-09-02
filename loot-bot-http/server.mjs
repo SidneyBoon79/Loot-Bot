@@ -1,8 +1,7 @@
-// server.mjs — Discord Interactions (HTTP only)
-// - Verifiziert Signatur
-// - Slash: /vote öffnet Modal (Item)
-// - Modal-Submit → ephemere Message mit Dropdown (Gear/Trait/Litho)
-// - Component (vote:grund:*) → Vote speichern
+// server.mjs — Discord Interactions (HTTP only, serverless-safe)
+// - /vote öffnet Modal (Item)
+// - MODAL_SUBMIT → ephemere Nachricht mit Dropdown (Gear/Trait/Litho)
+// - MESSAGE_COMPONENT (vote:grund:*) → DEFER sofort, danach FollowUp senden
 // - /roll Dropdown bleibt; /winner, /reducew etc. unverändert
 
 import express from "express";
@@ -115,8 +114,6 @@ function asStringSelect(placeholder, customId, optionsArr) {
 
 // ===== Express =====
 const app = express();
-app.use(express.json({ type: "*/*" })); // falls nötig
-
 app.get("/", (_req, res) => res.status(200).send("ok"));
 
 app.post(
@@ -153,8 +150,7 @@ app.post(
             const passedItem = opt.item?.value?.trim();
             if (!passedItem) {
               ctx.requireMod?.();
-              // (bestehende Dropdown-Logik aus deiner Datei bleibt unverändert)
-              const { rows: items } = await pool.query(
+              const { rows: items } = await ctx.db.query(
                 `SELECT i.item_name, COUNT(v.*) AS c_votes
                    FROM items i
                    JOIN votes v
@@ -210,7 +206,20 @@ app.post(
           const encoded = customId.slice("vote:grund:".length);
           const item = b64uDecode(encoded).trim();
           const reason = i.data?.values?.[0];
-          return cmdVote.handleReasonSelect({ ...ctx, item, reason });
+
+          // Sofort-ACK (deferred, ephemer) → verhindert 3s-Timeout
+          res.send({
+            type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+            data: { flags: EPHEMERAL }
+          });
+
+          // Danach FollowUp mit Ergebnis senden
+          try {
+            await cmdVote.handleReasonSelect({ ...ctx, item, reason, useFollowUp: true });
+          } catch (e) {
+            await ctx.followUp(`❌ ${e.message || "Fehler beim Speichern"}`, { ephemeral: true });
+          }
+          return;
         }
 
         return ctx.reply("Unbekannte UI-Interaktion.", { ephemeral: true });
@@ -220,7 +229,7 @@ app.post(
       if (i.type === InteractionType.MODAL_SUBMIT) {
         const ctx = makeCtx({ interaction: i, res });
         if (i.data?.custom_id === "vote:modal") {
-          // Liest Item aus dem Modal und liefert Dropdown zurück
+          // Modal liefert Item → schicke Dropdown zurück (ephemer)
           return cmdVote.handleModalSubmit(ctx);
         }
         return ctx.reply("Unbekanntes Modal.", { ephemeral: true });
