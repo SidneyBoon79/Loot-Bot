@@ -1,39 +1,38 @@
-// commands/reducew.mjs — Mod-Only: Nur Gewinner (win_count > 0) auswählbar, dann Modal für Anzahl
+// commands/reducew.mjs — Mod-Only: Nur Gewinner (win_count > 0) auswählbar, mit Namens-Cache
 
 function fmt(n) {
   return new Intl.NumberFormat("de-DE").format(Number(n) || 0);
 }
 
-/**
- * /reducew
- * Ephemere Nachricht mit String-Select:
- *   - zeigt NUR User aus wins, die win_count > 0 haben
- *   - Sortierung: wins DESC
- */
 export async function run(ctx) {
   ctx.requireMod?.();
 
+  // Gewinner + evtl. gecachter Anzeigename
   const { rows } = await ctx.db.query(
-    `SELECT user_id, win_count
-       FROM wins
-      WHERE guild_id = $1
-        AND win_count > 0
-      ORDER BY win_count DESC, user_id ASC
+    `SELECT w.user_id,
+            w.win_count,
+            COALESCE(m.display_name, w.user_id::text) AS display_name
+       FROM wins w
+       LEFT JOIN members m
+              ON m.guild_id = w.guild_id
+             AND m.user_id  = w.user_id
+      WHERE w.guild_id = $1
+        AND w.win_count > 0
+      ORDER BY w.win_count DESC, display_name ASC
       LIMIT 25`,
     [ctx.guildId]
   );
 
   if (!rows.length) {
     return ctx.reply("Keine User mit Wins vorhanden. ✅", { ephemeral: true });
-  }
+    }
 
-  // Hinweis: Mentions in Select-Labels werden von Discord NICHT als echte Mentions gerendert.
-  // Wir zeigen deshalb den Win-Stand prominent; die Bestätigung/Ergebnis nutzt dann <@id>.
   const options = rows.map(r => ({
-    label: `W${fmt(r.win_count)} • ${r.user_id}`, // kompakt erkennbar
+    // Hinweis: echte Mentions werden in Select-Labels nicht gerendert.
+    // Wir zeigen daher Klartext-Name aus Cache + W-Stand.
+    label: `${r.display_name} · W${fmt(r.win_count)}`,
     value: String(r.user_id),
     description: `aktueller Stand: W${fmt(r.win_count)}`
-    // emoji: { name: "🏅" } // optional
   }));
 
   const selectRow = {
@@ -59,9 +58,6 @@ export async function run(ctx) {
   );
 }
 
-/**
- * Baut das Modal. currentWins ist optional (nur Anzeigezweck).
- */
 export function makeModal(userId, currentWins = null) {
   const hint = currentWins == null ? "" : ` (aktuell: W${fmt(currentWins)})`;
   return {
@@ -74,7 +70,7 @@ export function makeModal(userId, currentWins = null) {
           {
             type: 4,
             custom_id: "reducew:user",
-            style: 1, // short text
+            style: 1,
             label: "User ID",
             value: String(userId),
             required: true
@@ -87,7 +83,7 @@ export function makeModal(userId, currentWins = null) {
           {
             type: 4,
             custom_id: "reducew:count",
-            style: 1, // short text
+            style: 1,
             label: "Anzahl (mind. 1)",
             placeholder: "1",
             required: true
@@ -98,26 +94,18 @@ export function makeModal(userId, currentWins = null) {
   };
 }
 
-/**
- * Verarbeitet das Modal: reduziert win_count (niemals unter 0) und bestätigt ephemer.
- */
 export async function handleModalSubmit(ctx) {
   const comps = ctx.interaction?.data?.components ?? [];
-  const userComp = comps[0]?.components?.[0];
+  const userComp  = comps[0]?.components?.[0];
   const countComp = comps[1]?.components?.[0];
 
   const targetUser = (userComp?.value || "").trim();
-  const rawCount = (countComp?.value || "").trim();
+  const rawCount   = (countComp?.value || "").trim();
   const delta = Math.max(1, Math.floor(Number(rawCount)));
 
-  if (!targetUser) {
-    return ctx.followUp("❌ User fehlt.", { ephemeral: true });
-  }
-  if (!Number.isFinite(delta) || delta < 1) {
-    return ctx.followUp("❌ Ungültige Anzahl.", { ephemeral: true });
-  }
+  if (!targetUser) return ctx.followUp("❌ User fehlt.", { ephemeral: true });
+  if (!Number.isFinite(delta) || delta < 1) return ctx.followUp("❌ Ungültige Anzahl.", { ephemeral: true });
 
-  // aktuellen Stand holen
   const cur = await ctx.db.query(
     `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
     [ctx.guildId, targetUser]
