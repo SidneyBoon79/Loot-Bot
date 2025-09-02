@@ -1,11 +1,11 @@
-// index.js — clean schema (items: item_name_first; votes: item_name_first), exact-one reason, 48h window, auto-prune
+// index.js — Votes + Roll (clean schema: item_name_first only)
 
 import {
   Client, GatewayIntentBits, Partials,
   REST, Routes, SlashCommandBuilder,
   ActionRowBuilder, StringSelectMenuBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle,
-  PermissionFlagsBits
+  PermissionFlagsBits, EmbedBuilder
 } from "discord.js";
 import pkg from "pg";
 const { Pool } = pkg;
@@ -28,7 +28,7 @@ const guildTimers = new Map();
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 async function initDB() {
-  // votes (uses item_name_first only)
+  // votes: uses item_name_first only
   await pool.query(`
     CREATE TABLE IF NOT EXISTS votes (
       id SERIAL PRIMARY KEY,
@@ -42,7 +42,7 @@ async function initDB() {
     );
   `);
 
-  // items (canonical first seen name)
+  // items: canonical first-seen name
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
       guild_id TEXT NOT NULL,
@@ -54,7 +54,7 @@ async function initDB() {
   await pool.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS item_name_first TEXT;`);
   await pool.query(`UPDATE items SET item_name_first = item_slug WHERE item_name_first IS NULL;`);
 
-  // settings (48h window end)
+  // settings: 48h window end
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       guild_id TEXT PRIMARY KEY,
@@ -63,6 +63,7 @@ async function initDB() {
   `);
 }
 
+/* ===== Helpers ===== */
 function slugify(s) {
   return String(s || "")
     .toLowerCase()
@@ -71,7 +72,34 @@ function slugify(s) {
     .replace(/[^a-z0-9_]/g, "");
 }
 
-/* ===== Window helpers ===== */
+async function ensureCanonicalItem(guildId, inputName) {
+  const name = String(inputName || "").trim();
+  if (!name) throw new Error("Leerer Item-Name.");
+  const slug = slugify(name);
+
+  await pool.query(
+    `INSERT INTO items (guild_id, item_slug, item_name_first)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (guild_id, item_slug) DO NOTHING`,
+    [guildId, slug, name]
+  );
+
+  await pool.query(
+    `UPDATE items
+        SET item_name_first = COALESCE(item_name_first, $3)
+      WHERE guild_id=$1 AND item_slug=$2 AND item_name_first IS NULL`,
+    [guildId, slug, name]
+  );
+
+  const { rows } = await pool.query(
+    `SELECT item_name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
+    [guildId, slug]
+  );
+  const displayName = rows[0]?.item_name_first || name;
+  return { slug, displayName };
+}
+
+/* ===== Window Handling ===== */
 async function getWindowEnd(guildId) {
   const { rows } = await pool.query(
     `SELECT window_end_at FROM settings WHERE guild_id=$1`, [guildId]
@@ -92,16 +120,17 @@ async function clearWindow(guildId) {
   await pool.query(`UPDATE settings SET window_end_at=NULL WHERE guild_id=$1`, [guildId]);
 }
 
+function clearWipeTimer(guildId) {
+  const t = guildTimers.get(guildId);
+  if (t) { clearTimeout(t); guildTimers.delete(guildId); }
+}
+
 async function wipeGuildVotes(guildId) {
   await pool.query(`DELETE FROM votes WHERE guild_id=$1`, [guildId]);
   await pool.query(`DELETE FROM items WHERE guild_id=$1`, [guildId]);
   await clearWindow(guildId);
+  clearWipeTimer(guildId);
   console.log(`[Auto-Wipe] ${guildId}: Votes + Items geleert.`);
-}
-
-function clearWipeTimer(guildId) {
-  const t = guildTimers.get(guildId);
-  if (t) { clearTimeout(t); guildTimers.delete(guildId); }
 }
 
 async function scheduleWipeIfNeeded(guildId) {
@@ -130,52 +159,23 @@ async function windowStillActive(guildId) {
   return !!end && end.getTime() > Date.now();
 }
 
-/* ===== Canonical name (first seen) ===== */
-async function ensureCanonicalItem(guildId, inputName) {
-  const name = String(inputName || "").trim();
-  if (!name) throw new Error("Leerer Item-Name.");
-  const slug = slugify(name);
-
-  await pool.query(
-    `INSERT INTO items (guild_id, item_slug, item_name_first)
-     VALUES ($1,$2,$3)
-     ON CONFLICT (guild_id, item_slug) DO NOTHING`,
-    [guildId, slug, name]
-  );
-
-  await pool.query(
-    `UPDATE items
-        SET item_name_first = COALESCE(item_name_first, $3)
-      WHERE guild_id=$1 AND item_slug=$2 AND item_name_first IS NULL`,
-    [guildId, slug, name]
-  );
-
-  const { rows } = await pool.query(
-    `SELECT item_name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
-    [guildId, slug]
-  );
-  const displayName = rows[0]?.item_name_first || name;
-  return { slug, displayName };
-}
-
-/* ===== Prune empty items ===== */
-async function pruneEmptyItems(guildId) {
-  await pool.query(`
-    DELETE FROM items i
-    WHERE i.guild_id = $1
-      AND NOT EXISTS (
-        SELECT 1 FROM votes v
-        WHERE v.guild_id = i.guild_id
-          AND v.item_slug = i.item_slug
-      )
-  `, [guildId]);
-}
-
 /* ===== Votes ===== */
+async function pruneEmptyItems(guildId) {
+  await pool.query(
+    `DELETE FROM items i
+      WHERE i.guild_id = $1
+        AND NOT EXISTS (
+          SELECT 1 FROM votes v
+           WHERE v.guild_id = i.guild_id
+             AND v.item_slug = i.item_slug
+        )`,
+    [guildId]
+  );
+}
+
 async function addVoteIfNew(guildId, itemNameInput, type, userId) {
   const t = String(type || "").toLowerCase();
   if (!["gear","trait","litho"].includes(t)) throw new Error("Ungültiger Grund");
-
   const { slug, displayName } = await ensureCanonicalItem(guildId, itemNameInput);
 
   const res = await pool.query(
@@ -243,13 +243,95 @@ async function showVotes(guildId, itemNameInput) {
   }
 }
 
+/* ===== Roll ===== */
+const REASON_WEIGHT = { gear: 3, trait: 2, litho: 1 };
+
+function reasonEmojiLabel(t) {
+  if (t === "gear") return "⚔️ Gear";
+  if (t === "trait") return "💠 Trait";
+  if (t === "litho") return "📜 Litho";
+  return t;
+}
+
+function medalForIndex(idx) {
+  if (idx === 0) return "🥇";
+  if (idx === 1) return "🥈";
+  if (idx === 2) return "🥉";
+  const map = { 3:"4️⃣", 4:"5️⃣", 5:"6️⃣", 6:"7️⃣", 7:"8️⃣", 8:"9️⃣", 9:"🔟" };
+  return map[idx] || `${idx+1}.`;
+}
+
+function buildRankingLines(sorted) {
+  return sorted.map((row, i) =>
+    `${medalForIndex(i)} ${row.displayName} — ${row.roll} (${reasonEmojiLabel(row.type)})`
+  ).join("\n");
+}
+
+/**
+ * Roll logic:
+ * - take best reason per user (Gear > Trait > Litho)
+ * - one roll per user (1..100)
+ * - sort by reason priority first, then roll desc
+ */
+async function rollForItem(guild, guildId, itemInput) {
+  const { slug, displayName } = await ensureCanonicalItem(guildId, itemInput);
+
+  // Get best reason per user via SQL aggregation
+  const { rows } = await pool.query(
+    `
+    SELECT user_id,
+           MAX(CASE type WHEN 'gear' THEN 3 WHEN 'trait' THEN 2 WHEN 'litho' THEN 1 ELSE 0 END) AS w,
+           BOOL_OR(type='gear')  AS has_gear,
+           BOOL_OR(type='trait') AS has_trait,
+           BOOL_OR(type='litho') AS has_litho
+      FROM votes
+     WHERE guild_id=$1 AND item_slug=$2
+  GROUP BY user_id
+    `,
+    [guildId, slug]
+  );
+
+  if (rows.length === 0) {
+    return { displayItemName: displayName, winner: null, lines: null };
+  }
+
+  // Resolve chosen reason per user from w/flags, fetch display names, roll
+  const resolved = [];
+  for (const r of rows) {
+    let type = "litho";
+    const w = Number(r.w) || 0;
+    if (w === 3 && r.has_gear) type = "gear";
+    else if (w === 2 && r.has_trait) type = "trait";
+    else if (r.has_litho) type = "litho";
+
+    let displayNameU = `<@${r.user_id}>`;
+    try {
+      const m = await guild.members.fetch(r.user_id);
+      displayNameU = m?.displayName || m?.user?.username || displayNameU;
+    } catch { /* user might not be in guild */ }
+
+    const roll = Math.floor(Math.random() * 100) + 1;
+    resolved.push({ userId: r.user_id, type, displayName: displayNameU, roll });
+  }
+
+  resolved.sort((a, b) => {
+    const dw = (REASON_WEIGHT[b.type] ?? 0) - (REASON_WEIGHT[a.type] ?? 0);
+    if (dw !== 0) return dw;
+    return b.roll - a.roll;
+  });
+
+  const lines = buildRankingLines(resolved);
+  const winner = resolved[0];
+  return { displayItemName: displayName, winner, lines };
+}
+
 /* ===== Discord Client ===== */
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
   partials: [Partials.Channel]
 });
 
-/* ===== Slash-Commands ===== */
+/* ===== Slash Commands ===== */
 async function registerSlash() {
   if (!CLIENT_ID) return;
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -268,6 +350,11 @@ async function registerSlash() {
     new SlashCommandBuilder().setName("vote-remove")
       .setDescription("Eigene Votes für ein Item löschen")
       .addStringOption(o => o.setName("item").setDescription("Item-Name").setRequired(true))
+      .toJSON(),
+    new SlashCommandBuilder().setName("roll")
+      .setDescription("Würfelt das Item unter allen Votern aus (Mods)")
+      .addStringOption(o => o.setName("item").setDescription("Item-Name").setRequired(true))
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       .toJSON()
   ];
 
@@ -280,67 +367,60 @@ async function registerSlash() {
   }
 }
 
+/* ===== Ready ===== */
 client.once("ready", async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await initDB();
-  try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e.message); }
-
-  // Restore active windows (if any)
-  const { rows } = await pool.query(
-    `SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`
-  );
-  for (const r of rows) {
-    const end = new Date(r.window_end_at);
-    if (end.getTime() <= Date.now()) {
-      await wipeGuildVotes(r.guild_id);
-    } else {
-      const msLeft = end.getTime() - Date.now();
-      const timer = setTimeout(async () => {
-        try { await wipeGuildVotes(r.guild_id); } finally { guildTimers.delete(r.guild_id); }
-      }, msLeft);
-      guildTimers.set(r.guild_id, timer);
-    }
-  }
+  try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e?.message || e); }
 });
 
 /* ===== Interactions ===== */
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
+      const guild = interaction.guild;
       const guildId = interaction.guildId;
 
+      // /vote -> open modal
       if (interaction.commandName === "vote") {
         await ensureWindowActive(guildId);
 
         const modal = new ModalBuilder()
           .setCustomId("voteItemModal")
           .setTitle("Vote abgeben");
+
         const itemInput = new TextInputBuilder()
           .setCustomId("itemName")
           .setLabel("Item-Name")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setPlaceholder("z. B. Schwert");
+
         modal.addComponents(new ActionRowBuilder().addComponents(itemInput));
         return interaction.showModal(modal);
       }
 
+      // /vote-show
       if (interaction.commandName === "vote-show") {
         const item = interaction.options.getString("item") || null;
         const out = await showVotes(guildId, item);
         return interaction.reply({ content: out, ephemeral: false });
       }
 
+      // /vote-clear
       if (interaction.commandName === "vote-clear") {
         const perms = interaction.memberPermissions;
         if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
           return interaction.reply({ content: "Nur Moderation darf das.", ephemeral: true });
         }
-        clearWipeTimer(guildId);
         await wipeGuildVotes(guildId);
-        return interaction.reply({ content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.", ephemeral: false });
+        return interaction.reply({
+          content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.",
+          ephemeral: false
+        });
       }
 
+      // /vote-remove
       if (interaction.commandName === "vote-remove") {
         const item = interaction.options.getString("item", true);
         const removed = await removeUserVotes(guildId, item, interaction.user.id);
@@ -350,6 +430,22 @@ client.on("interactionCreate", async (interaction) => {
             : `⚠️ Du hattest keine Votes für **${item}**.`,
           ephemeral: true
         });
+      }
+
+      // /roll
+      if (interaction.commandName === "roll") {
+        const item = interaction.options.getString("item", true);
+        const { displayItemName, winner, lines } = await rollForItem(guild, guildId, item);
+
+        if (!lines) {
+          return interaction.reply({ content: `Für **${displayItemName}** gibt es keine gültigen Teilnehmer.`, ephemeral: true });
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle(`🎲 Würfelrunde für **${displayItemName}**`)
+          .setDescription(`${lines}\n\n🏆 Gewinner: ${winner.displayName} (${reasonEmojiLabel(winner.type)})`);
+
+        return interaction.reply({ embeds: [embed] });
       }
     }
 
@@ -385,7 +481,6 @@ client.on("interactionCreate", async (interaction) => {
       const userId = interaction.user.id;
 
       if (!(await windowStillActive(guildId))) {
-        clearWipeTimer(guildId);
         await wipeGuildVotes(guildId);
         return interaction.update({ content: "⏱️ Das 48h-Fenster ist vorbei. Starte mit einem neuen `/vote` neu.", components: [] });
       }
@@ -403,12 +498,14 @@ client.on("interactionCreate", async (interaction) => {
     }
   } catch (e) {
     console.error("Interaction error:", e);
-    if (interaction.isRepliable()) {
-      try {
-        const msg = typeof e?.message === "string" ? e.message : "Unbekannter Fehler";
-        return interaction.reply({ content: `Fehler: ${msg}`, ephemeral: true });
-      } catch {}
-    }
+    try {
+      const msg = typeof e?.message === "string" ? e.message : "Unbekannter Fehler";
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: `Fehler: ${msg}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Fehler: ${msg}`, ephemeral: true });
+      }
+    } catch {}
   }
 });
 
