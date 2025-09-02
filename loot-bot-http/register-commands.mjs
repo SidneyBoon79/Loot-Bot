@@ -1,20 +1,21 @@
-// register-commands.mjs — robuste Version (fix: default_member_permissions als "32")
-// Registriert alle Slash-Commands (Guild bevorzugt), nutzt BOT_TOKEN, Backoff bei 429,
-// schläft nach Erfolg 5 Min, damit Railway nicht in den Restart-Loop rennt.
+// register-commands.mjs — CLEAN: löscht Global-Commands, setzt nur Guild-Commands
+// - nutzt BOT_TOKEN (wie server.mjs)
+// - default_member_permissions = "32" (ManageGuild) als Dezimal-String
+// - 429-Backoff + 5min Sleep, damit Railway nicht neu startet
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID  = process.env.GUILD_ID || ""; // optional, aber empfohlen
+const GUILD_ID  = process.env.GUILD_ID; // zwingend für Clean-Run
 
-if (!BOT_TOKEN || !CLIENT_ID) {
-  console.error("❌ ENV fehlt: BOT_TOKEN und/oder CLIENT_ID");
+if (!BOT_TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error("❌ ENV fehlt: BOT_TOKEN, CLIENT_ID oder GUILD_ID");
   process.exit(1);
 }
 
 const API_BASE  = "https://discord.com/api/v10";
-const MOD_PERMS = "32"; // ManageGuild als Dezimal-String (nicht "0x20")
+const MOD_PERMS = "32"; // ManageGuild
 
-// ---------- Commands ----------
+// ---------- Commands (Guild-only) ----------
 const commands = [
   { name: "vote-info", description: "Erklärt kurz das Voting (ephemer).", type: 1, dm_permission: false },
 
@@ -39,11 +40,8 @@ const commands = [
   {
     name: "vote-remove",
     description: "Entfernt deine Stimme zu einem Item (kein Überschreiben per /vote).",
-    type: 1,
-    dm_permission: false,
-    options: [
-      { type: 3, name: "item", description: "Item-Name, von dem deine Stimme entfernt wird", required: true },
-    ],
+    type: 1, dm_permission: false,
+    options: [{ type: 3, name: "item", description: "Item-Name, von dem deine Stimme entfernt wird", required: true }],
   },
 
   { name: "vote-show", description: "Zeigt alle gültigen Votes der letzten 48h (öffentlich, mit ✅/🟡).", type: 1, dm_permission: false },
@@ -55,9 +53,7 @@ const commands = [
   {
     name: "reducew",
     description: "Reduziert die Win-Zahl einer Person (nie unter 0; ephemer bestätigt).",
-    type: 1,
-    dm_permission: false,
-    default_member_permissions: MOD_PERMS,
+    type: 1, dm_permission: false, default_member_permissions: MOD_PERMS,
     options: [
       { type: 6, name: "user",   description: "Wessen Win-Zahl reduziert werden soll", required: true },
       { type: 4, name: "anzahl", description: "Wie viele Wins abziehen (min. 1)",      required: true, min_value: 1 },
@@ -112,24 +108,13 @@ async function registerGlobal(appId, cmds) {
 // ---------- Main ----------
 (async () => {
   try {
-    if (GUILD_ID) {
-      console.log("⏫ Registriere GUILD-Commands für Guild " + GUILD_ID + " (sofort sichtbar) …");
-      const out = await registerGuild(CLIENT_ID, GUILD_ID, commands);
-      console.log("✅ Guild-Commands registriert: " + (Array.isArray(out) ? out.length : "?"));
-    } else {
-      console.log("⚠️  GUILD_ID fehlt – registriere GLOBAL (kann bis zu 1h dauern) …");
-      const out = await registerGlobal(CLIENT_ID, commands);
-      console.log("✅ Global-Commands registriert: " + (Array.isArray(out) ? out.length : "?"));
-    }
+    // 1) Global-Commands hart leeren (sonst doppelte Einträge im Client)
+    console.log("🧹 Lösche GLOBAL-Commands (PUT []) …");
+    await registerGlobal(CLIENT_ID, []); // wichtig!
 
-    console.log("⏳ Fertig. Schlafe jetzt 5 Minuten, damit keine Restart-Schleife entsteht …");
-    await sleep(5 * 60 * 1000);
-    console.log("👋 Ende. (Jetzt Start Command zurück auf `node server.mjs` setzen.)");
-    process.exit(0);
+    // 2) Nur Guild-Commands setzen
+    console.log("⏫ Registriere GUILD-Commands für Guild " + GUILD_ID + " (sofort sichtbar) …");
+    const out = await registerGuild(CLIENT_ID, GUILD_ID, commands);
+    console.log("✅ Guild-Commands registriert: " + (Array.isArray(out) ? out.length : "?"));
 
-  } catch (err) {
-    console.error("❌ Registrierung fehlgeschlagen:", (err && err.message) || err);
-    await sleep(30 * 1000);
-    process.exit(1);
-  }
-})();
+    conso
