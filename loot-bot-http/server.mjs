@@ -116,16 +116,16 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
           const modal = cmdVote.makeVoteModal();
           return res.send({ type: InteractionResponseType.MODAL, data: modal });
         }
-        case "vote-show":   return cmdVoteShow.run(ctx); // macht selbst defer()
-        case "vote-remove": return cmdVoteRemove.run(ctx); // zeigt Dropdown
+        case "vote-show":   return cmdVoteShow.run(ctx);
+        case "vote-remove": return cmdVoteRemove.run(ctx);
         case "vote-clear":  return cmdVoteClear.run(ctx);
         case "vote-info":   return cmdVoteInfo.run(ctx);
 
         case "roll":       return cmdRoll.run(ctx);
         case "roll-all":   return cmdRollAll.run(ctx);
         case "winner":     return cmdWinner.run(ctx);
-        case "reducew":    return cmdReduceW.run(ctx); // Dropdown + Modal
 
+        case "reducew":    return cmdReduceW.run(ctx); // USER_SELECT + Modal
         default:
           if (!implemented.has(name)) return ctx.reply(`\`/${name}\` ist noch nicht migriert – kommt gleich.`, { ephemeral: true });
           return ctx.reply("Unbekannter Command.", { ephemeral: true });
@@ -167,11 +167,19 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
         return;
       }
 
-      // /reducew – User wählen -> Modal anzeigen
-      if (customId === "reducew:select") {
+      // /reducew – USER_SELECT -> Modal
+      if (customId === "reducew:userpick") {
         ctx.requireMod?.();
         const selectedUser = i.data?.values?.[0];
-        const modal = cmdReduceW.makeModal(selectedUser);
+
+        // aktuellen Win-Count holen (nur für Anzeige im Modal-Titel)
+        const cur = await ctx.db.query(
+          `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
+          [ctx.guildId, selectedUser]
+        );
+        const currentWins = cur.rows[0]?.win_count ?? 0;
+
+        const modal = cmdReduceW.makeModal(selectedUser, currentWins);
         return res.send({ type: InteractionResponseType.MODAL, data: modal });
       }
 
