@@ -1,11 +1,11 @@
-// register-commands.mjs — CLEAN: löscht Global-Commands, setzt nur Guild-Commands
-// - nutzt BOT_TOKEN (wie server.mjs)
-// - default_member_permissions = "32" (ManageGuild) als Dezimal-String
-// - 429-Backoff + 5min Sleep, damit Railway nicht neu startet
+// register-commands.mjs — CLEAN: löscht Global-Commands, setzt nur Guild-Commands (Modal-Flow für /vote)
+// - BOT_TOKEN wie im server.mjs
+// - default_member_permissions = "32" (ManageGuild) Dezimalstring
+// - 429-Backoff + 5min Sleep, damit Railway nicht in Restart-Loop rennt
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID  = process.env.GUILD_ID; // zwingend für Clean-Run
+const GUILD_ID  = process.env.GUILD_ID; // erforderlich für CLEAN-Run
 
 if (!BOT_TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ ENV fehlt: BOT_TOKEN, CLIENT_ID oder GUILD_ID");
@@ -17,33 +17,16 @@ const MOD_PERMS = "32"; // ManageGuild
 
 // ---------- Commands (Guild-only) ----------
 const commands = [
+  // /vote OHNE Optionen → öffnet Modal (Item), danach Dropdown (Grund) via Komponenten
+  { name: "vote", description: "Vote abgeben: Item eingeben, dann Typ(en) wählen.", type: 1, dm_permission: false },
+
   { name: "vote-info", description: "Erklärt kurz das Voting (ephemer).", type: 1, dm_permission: false },
-
-  {
-    name: "vote",
-    description: "Stimme für ein Item mit Grund ab (kein Doppelvote).",
-    type: 1,
-    dm_permission: false,
-    options: [
-      { type: 3, name: "item", description: "Item-Name (z. B. Schwert, Ring, Bogen …)", required: true },
-      {
-        type: 3, name: "grund", description: "Grund deiner Stimme", required: true,
-        choices: [
-          { name: "⚔️ Gear",  value: "gear"  },
-          { name: "💠 Trait", value: "trait" },
-          { name: "📜 Litho", value: "litho" },
-        ],
-      },
-    ],
-  },
-
   {
     name: "vote-remove",
     description: "Entfernt deine Stimme zu einem Item (kein Überschreiben per /vote).",
     type: 1, dm_permission: false,
     options: [{ type: 3, name: "item", description: "Item-Name, von dem deine Stimme entfernt wird", required: true }],
   },
-
   { name: "vote-show", description: "Zeigt alle gültigen Votes der letzten 48h (öffentlich, mit ✅/🟡).", type: 1, dm_permission: false },
 
   { name: "roll",     description: "Rollt ein einzelnes Item (Dropdown-Auswahl; Ergebnis öffentlich).",    type: 1, dm_permission: false, default_member_permissions: MOD_PERMS },
@@ -108,13 +91,21 @@ async function registerGlobal(appId, cmds) {
 // ---------- Main ----------
 (async () => {
   try {
-    // 1) Global-Commands hart leeren (sonst doppelte Einträge im Client)
     console.log("🧹 Lösche GLOBAL-Commands (PUT []) …");
-    await registerGlobal(CLIENT_ID, []); // wichtig!
+    await registerGlobal(CLIENT_ID, []); // Doppelte Einträge killen
 
-    // 2) Nur Guild-Commands setzen
     console.log("⏫ Registriere GUILD-Commands für Guild " + GUILD_ID + " (sofort sichtbar) …");
     const out = await registerGuild(CLIENT_ID, GUILD_ID, commands);
     console.log("✅ Guild-Commands registriert: " + (Array.isArray(out) ? out.length : "?"));
 
-    conso
+    console.log("⏳ Fertig. Schlafe jetzt 5 Minuten, damit keine Restart-Schleife entsteht …");
+    await sleep(5 * 60 * 1000);
+    console.log("👋 Ende. (Jetzt Start Command zurück auf `node server.mjs` setzen.)");
+    process.exit(0);
+
+  } catch (err) {
+    console.error("❌ Registrierung fehlgeschlagen:", (err && err.message) || err);
+    await sleep(30 * 1000);
+    process.exit(1);
+  }
+})();
