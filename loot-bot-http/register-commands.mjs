@@ -1,12 +1,13 @@
-// register-commands.mjs
-// Registriert alle Slash-Commands.
-// Nutzt Guild-Register (sofort sichtbar), fallback auf global wenn GUILD_ID fehlt.
-// Node >=18 (fetch vorhanden). ESM-Datei.
+// register-commands.mjs (SAFE VERSION)
+// - Registriert alle Slash-Commands (Guild bevorzugt).
+// - Nutzt BOT_TOKEN (konsistent mit server.mjs).
+// - Handhabt 429 mit Backoff.
+// - Vermeidet Railway-Restart-Loop: schläft nach Erfolg 5 Minuten statt sofort zu exitten.
 
 const {
-  BOT_TOKEN,     // <<< konsistent zu server.mjs
+  BOT_TOKEN,     // konsistent zu server.mjs
   CLIENT_ID,
-  GUILD_ID,      // empfohlen für schnelle Sichtbarkeit
+  GUILD_ID,      // empfohlen für sofortige Sichtbarkeit
 } = process.env;
 
 if (!BOT_TOKEN || !CLIENT_ID) {
@@ -14,14 +15,8 @@ if (!BOT_TOKEN || !CLIENT_ID) {
   process.exit(1);
 }
 
-/**
- * Commands-Definitionen
- * Mod-Only: /roll, /roll-all, /vote-clear, /winner, /reducew
- * Hinweise:
- * - default_member_permissions: "0x20" = ManageGuild
- * - dm_permission: false (keine DMs)
- */
 const MOD_PERMS = "0x20"; // ManageGuild
+const API_BASE = "https://discord.com/api/v10";
 
 /** @type {import("discord-api-types/v10").RESTPostAPIChatInputApplicationCommandsJSONBody[]} */
 const commands = [
@@ -49,7 +44,7 @@ const commands = [
         name: "grund",
         description: "Grund deiner Stimme",
         required: true,
-        // WICHTIG: Werte müssen zu commands/*.mjs passen: gear/trait/litho
+        // WICHTIG: passt zu commands/*.mjs
         choices: [
           { name: "⚔️ Gear",  value: "gear"  },
           { name: "💠 Trait", value: "trait" },
@@ -86,7 +81,6 @@ const commands = [
     type: 1,
     dm_permission: false,
     default_member_permissions: MOD_PERMS,
-    // keine Options → Server bietet Dropdown oder nutzt item:<Name>
   },
   {
     name: "roll-all",
@@ -133,72 +127,44 @@ const commands = [
   },
 ];
 
-/**
- * Hilfsfunktionen
- */
-const API_BASE = "https://discord.com/api/v10";
+// ---------- Helpers ----------
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function putJSON(url, body) {
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bot ${BOT_TOKEN}`,
-    },
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  let data;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text;
-  }
-  if (!res.ok) {
-    const msg =
-      typeof data === "string"
+  let attempt = 0;
+  while (true) {
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bot ${BOT_TOKEN}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 429) {
+      const rl = res.headers.get("Retry-After") || res.headers.get("retry-after");
+      const retryAfterMs = rl ? Number(rl) * 1000 : Math.min(60000, 1000 * Math.pow(2, attempt));
+      console.warn(`⚠️  429 Rate Limited – warte ${Math.round(retryAfterMs/1000)}s …`);
+      await sleep(retryAfterMs);
+      attempt++;
+      continue;
+    }
+
+    const text = await res.text();
+    let data;
+    try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+
+    if (!res.ok) {
+      const msg = typeof data === "string"
         ? data
         : data?.message || `HTTP ${res.status} ${res.statusText}`;
-    console.error("❌ Discord API Fehler:", msg, data?.errors || "");
-    throw new Error(msg);
+      console.error("❌ Discord API Fehler:", msg, data?.errors || "");
+      throw new Error(msg);
+    }
+    return data;
   }
-  return data;
 }
 
 async function registerGuild(appId, guildId, cmds) {
-  const url = `${API_BASE}/applications/${appId}/guilds/${guildId}/commands`;
-  return putJSON(url, cmds);
-}
-
-async function registerGlobal(appId, cmds) {
-  const url = `${API_BASE}/applications/${appId}/commands`;
-  return putJSON(url, cmds);
-}
-
-/**
- * Main
- */
-(async () => {
-  try {
-    if (GUILD_ID) {
-      console.log(
-        `⏫ Registriere GUILD-Commands für Guild ${GUILD_ID} (sofort sichtbar)…`
-      );
-      const out = await registerGuild(CLIENT_ID, GUILD_ID, commands);
-      console.log(
-        `✅ Guild-Commands registriert: ${Array.isArray(out) ? out.length : "?"}`
-      );
-    } else {
-      console.log(
-        "⚠️  GUILD_ID fehlt – registriere GLOBAL (kann bis zu 1h dauern)…"
-      );
-      const out = await registerGlobal(CLIENT_ID, commands);
-      console.log(
-        `✅ Global-Commands registriert: ${Array.isArray(out) ? out.length : "?"}`
-      );
-    }
-  } catch (err) {
-    console.error("❌ Registrierung fehlgeschlagen:", err?.message || err);
-    process.exit(1);
-  }
-})();
+  const url = `${API_BASE}/applications/${appId}/guilds/${gu_
