@@ -522,7 +522,7 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.commandName === "vote-show") {
         const item = interaction.options.getString("item") || null;
         const out = await showVotes(guildId, item);
-        return interaction.reply({ content: out, ephemeral: false });
+        return interaction.reply({ content: out, ephemeral: true });
       }
 
       // /vote-clear (Mods)
