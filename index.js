@@ -1,4 +1,4 @@
-// index.js — canonical names (erste Schreibweise), exact-one reason, 48h window, prune items
+// index.js — clean schema (items: item_name_first; votes: item_name_first), exact-one reason, 48h window, auto-prune
 
 import {
   Client, GatewayIntentBits, Partials,
@@ -7,7 +7,6 @@ import {
   ModalBuilder, TextInputBuilder, TextInputStyle,
   PermissionFlagsBits
 } from "discord.js";
-
 import pkg from "pg";
 const { Pool } = pkg;
 
@@ -16,13 +15,12 @@ const TOKEN = process.env.TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 const CLIENT_ID = process.env.CLIENT_ID || "";
 const GUILD_ID = process.env.GUILD_ID || "";
-
 if (!TOKEN || !DATABASE_URL) {
   console.error("Fehlende ENV: TOKEN und/oder DATABASE_URL");
   process.exit(1);
 }
 
-/* ===== KONSTANTEN ===== */
+/* ===== CONSTANTS ===== */
 const WINDOW_MS = 48 * 60 * 60 * 1000; // 48h
 const guildTimers = new Map();
 
@@ -30,13 +28,13 @@ const guildTimers = new Map();
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 async function initDB() {
-  // votes
+  // votes (uses item_name_first only)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS votes (
       id SERIAL PRIMARY KEY,
       guild_id   TEXT NOT NULL,
       item_slug  TEXT NOT NULL,
-      item_name_first  TEXT NOT NULL,
+      item_name_first TEXT NOT NULL,
       type       TEXT NOT NULL CHECK (type IN ('gear','trait','litho')),
       user_id    TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -44,7 +42,7 @@ async function initDB() {
     );
   `);
 
-  // items
+  // items (canonical first seen name)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
       guild_id TEXT NOT NULL,
@@ -56,7 +54,7 @@ async function initDB() {
   await pool.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS item_name_first TEXT;`);
   await pool.query(`UPDATE items SET item_name_first = item_slug WHERE item_name_first IS NULL;`);
 
-  // settings
+  // settings (48h window end)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       guild_id TEXT PRIMARY KEY,
@@ -66,10 +64,14 @@ async function initDB() {
 }
 
 function slugify(s) {
-  return s.toLowerCase().trim().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "");
+  return String(s || "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "");
 }
 
-/* ===== Fenster / Auto-Wipe ===== */
+/* ===== Window helpers ===== */
 async function getWindowEnd(guildId) {
   const { rows } = await pool.query(
     `SELECT window_end_at FROM settings WHERE guild_id=$1`, [guildId]
@@ -128,30 +130,35 @@ async function windowStillActive(guildId) {
   return !!end && end.getTime() > Date.now();
 }
 
-/* ===== Kanonischer Name ===== */
+/* ===== Canonical name (first seen) ===== */
 async function ensureCanonicalItem(guildId, inputName) {
-  const slug = slugify(inputName);
+  const name = String(inputName || "").trim();
+  if (!name) throw new Error("Leerer Item-Name.");
+  const slug = slugify(name);
+
   await pool.query(
     `INSERT INTO items (guild_id, item_slug, item_name_first)
      VALUES ($1,$2,$3)
      ON CONFLICT (guild_id, item_slug) DO NOTHING`,
-    [guildId, slug, inputName]
+    [guildId, slug, name]
   );
+
   await pool.query(
     `UPDATE items
         SET item_name_first = COALESCE(item_name_first, $3)
       WHERE guild_id=$1 AND item_slug=$2 AND item_name_first IS NULL`,
-    [guildId, slug, inputName]
+    [guildId, slug, name]
   );
+
   const { rows } = await pool.query(
     `SELECT item_name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
     [guildId, slug]
   );
-  const displayName = rows[0]?.item_name_first || inputName;
+  const displayName = rows[0]?.item_name_first || name;
   return { slug, displayName };
 }
 
-/* ===== Helfer: leere Items löschen ===== */
+/* ===== Prune empty items ===== */
 async function pruneEmptyItems(guildId) {
   await pool.query(`
     DELETE FROM items i
@@ -168,6 +175,7 @@ async function pruneEmptyItems(guildId) {
 async function addVoteIfNew(guildId, itemNameInput, type, userId) {
   const t = String(type || "").toLowerCase();
   if (!["gear","trait","litho"].includes(t)) throw new Error("Ungültiger Grund");
+
   const { slug, displayName } = await ensureCanonicalItem(guildId, itemNameInput);
 
   const res = await pool.query(
@@ -241,7 +249,7 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-/* ===== Slash-Commands registrieren ===== */
+/* ===== Slash-Commands ===== */
 async function registerSlash() {
   if (!CLIENT_ID) return;
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -277,6 +285,7 @@ client.once("ready", async () => {
   await initDB();
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e.message); }
 
+  // Restore active windows (if any)
   const { rows } = await pool.query(
     `SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`
   );
@@ -344,6 +353,7 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
+    // Modal submit -> select exactly one reason
     if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
       const item = interaction.fields.getTextInputValue("itemName");
       const guildId = interaction.guildId;
@@ -368,6 +378,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
+    // Select -> store vote
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
       const itemInput = interaction.customId.slice("voteType:".length);
       const guildId = interaction.guildId;
