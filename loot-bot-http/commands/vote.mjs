@@ -1,8 +1,4 @@
-// commands/vote.mjs — Modal + Dropdown-Flow
-// /vote -> Modal("Item")
-// MODAL_SUBMIT -> ephemere Nachricht mit Dropdown (Gear/Trait/Litho)
-// MESSAGE_COMPONENT (vote:grund:<b64u(item)>) -> Vote speichern
-
+// commands/vote.mjs — Modal + Dropdown-Flow (deferred-safe)
 const VALID_REASONS = new Map([
   ["gear",  "⚔️ Gear"],
   ["trait", "💠 Trait"],
@@ -15,7 +11,7 @@ function normalizeItem(raw) {
 
 function asStringSelect(placeholder, customId, optionsArr) {
   return {
-    type: 1, // Action Row
+    type: 1,
     components: [
       { type: 3, custom_id: customId, placeholder, min_values: 1, max_values: 1, options: optionsArr }
     ]
@@ -38,7 +34,7 @@ export function makeVoteModal() {
     title: "Vote abgeben",
     components: [
       {
-        type: 1, // Action Row
+        type: 1,
         components: [
           {
             type: 4, // Text Input
@@ -66,7 +62,6 @@ export async function handleModalSubmit(ctx) {
     return ctx.reply("Bitte gib ein Item an.", { ephemeral: true });
   }
 
-  // Dropdown mit Gründen schicken (ephemer)
   const encoded = b64uEncode(item);
   const optionsArr = [
     { label: "Gear (⚔️)",  value: "gear",  description: "Direktes Upgrade" },
@@ -84,13 +79,16 @@ export async function handleModalSubmit(ctx) {
 }
 
 export async function handleReasonSelect(ctx) {
-  // ctx enthält .item (vom server.mjs gesetzt) und .reason (Dropdown-Wert)
   const item = normalizeItem(ctx.item);
   const reason = (ctx.reason ?? "").trim();
 
-  if (!item) return ctx.reply("Item fehlt.", { ephemeral: true });
+  if (!item) {
+    const msg = "Item fehlt.";
+    return ctx.useFollowUp ? ctx.followUp(msg, { ephemeral: true }) : ctx.reply(msg, { ephemeral: true });
+  }
   if (!VALID_REASONS.has(reason)) {
-    return ctx.reply("Ungültiger Grund.", { ephemeral: true });
+    const msg = "Ungültiger Grund.";
+    return ctx.useFollowUp ? ctx.followUp(msg, { ephemeral: true }) : ctx.reply(msg, { ephemeral: true });
   }
 
   await ensureSchema(ctx.db);
@@ -106,21 +104,19 @@ export async function handleReasonSelect(ctx) {
   if (check.rowCount > 0) {
     const existing = check.rows[0];
     const pretty = VALID_REASONS.get(existing.reason) || existing.reason;
-    return ctx.reply(
-      `Du hast bereits für **${item}** gevotet: ${pretty}.\n` +
-      `Wenn du ändern willst: bitte zuerst \`/vote-remove item:${item}\` ausführen und dann neu voten.`,
-      { ephemeral: true }
-    );
+    const msg = `Du hast bereits für **${item}** gevotet: ${pretty}.\n` +
+                `Wenn du ändern willst: bitte zuerst \`/vote-remove item:${item}\` ausführen und dann neu voten.`;
+    return ctx.useFollowUp ? ctx.followUp(msg, { ephemeral: true }) : ctx.reply(msg, { ephemeral: true });
   }
 
-  // Insert (neuer Vote)
+  // Insert Vote
   await ctx.db.query(
     `INSERT INTO votes (guild_id, user_id, item_name, reason, created_at)
      VALUES ($1, $2, $3, $4, NOW())`,
     [ctx.guildId, ctx.userId, item, reason]
   );
 
-  // Item im Register anlegen (für Dropdowns/roll)
+  // Item registrieren
   await ctx.db.query(
     `INSERT INTO items (guild_id, item_name, rolled, created_at)
      VALUES ($1, $2, FALSE, NOW())
@@ -129,12 +125,8 @@ export async function handleReasonSelect(ctx) {
   );
 
   const prettyReason = VALID_REASONS.get(reason);
-  return ctx.reply(
-    `✅ Vote gespeichert:\n` +
-    `• **Item:** ${item}\n` +
-    `• **Grund:** ${prettyReason}`,
-    { ephemeral: true }
-  );
+  const msg = `✅ Vote gespeichert:\n• **Item:** ${item}\n• **Grund:** ${prettyReason}`;
+  return ctx.useFollowUp ? ctx.followUp(msg, { ephemeral: true }) : ctx.reply(msg, { ephemeral: true });
 }
 
 // ===== Schema =====
