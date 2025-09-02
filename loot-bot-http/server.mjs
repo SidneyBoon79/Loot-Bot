@@ -18,17 +18,47 @@ app.post(
   async (req, res) => {
     const interaction = req.body;
 
-    // 1) PING -> PONG (Discord testet damit, ob dein Endpoint korrekt antwortet)
+    // 1) PING -> PONG (für Discord-Verification)
     if (interaction.type === InteractionType.PING) {
       return res.send({ type: InteractionResponseType.PONG });
     }
 
-    // 2) Platzhalter für alle anderen Interaktionen
+    // 2) Slash-Commands
+    if (interaction.type === InteractionType.APPLICATION_COMMAND) {
+      const name = interaction.data?.name;
+
+      if (name === "vote-info") {
+        const content =
+          "🔰 **Loot-Bot HTTP ist live**\n" +
+          "Dies ist die Serverless/Interactions-only Variante. " +
+          "Dein richtiges Tutorial hängen wir gleich aus der Bot-Logik dran.\n\n" +
+          "_Antwort ist ephemer (nur du siehst das)._";
+
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content,
+            flags: 64, // 64 = ephemer (nur der Aufrufer sieht’s)
+          },
+        });
+      }
+
+      // Fallback für unbekannte Commands
+      return res.send({
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          content: "Unbekannter Command.",
+          flags: 64,
+        },
+      });
+    }
+
+    // 3) Alles andere (Buttons etc. kommt später)
     return res.send({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
-        content: "Loot-Bot HTTP ist online ✅ (Migration läuft …)",
-        flags: 64, // 64 = nur der Aufrufer sieht's (ephemeral)
+        content: "Interaction-Typ noch nicht verdrahtet.",
+        flags: 64,
       },
     });
   }
