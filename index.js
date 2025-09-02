@@ -522,7 +522,7 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.commandName === "vote-show") {
         const item = interaction.options.getString("item") || null;
         const out = await showVotes(guildId, item);
-        return interaction.reply({ content: out, ephemeral: true });
+        return interaction.reply({ content: out, ephemeral: false });
       }
 
       // /vote-clear (Mods)
@@ -569,7 +569,7 @@ client.on("interactionCreate", async (interaction) => {
       // /vote-info
       if (interaction.commandName === "vote-info") {
         const embeds = getVoteInfoEmbeds();
-        return interaction.reply({ embeds, ephemeral: false });
+        return interaction.reply({ embeds, ephemeral: true });
       }
     }
 
