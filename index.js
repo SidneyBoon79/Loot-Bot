@@ -1,4 +1,4 @@
-// index.js — Votes + Roll + Fairness (item_name_first only; Sort: Grund > Wins(48h) > Roll)
+// index.js — Votes + Roll + Fairness (clean schema; Sort: Grund > Wins(48h) > Roll)
 
 import {
   Client, GatewayIntentBits, Partials,
@@ -138,11 +138,12 @@ function clearWipeTimer(guildId) {
   if (t) { clearTimeout(t); guildTimers.delete(guildId); }
 }
 async function wipeGuildVotes(guildId) {
-  await pool.query(`DELETE FROM votes WHERE guild_id=$1`, [guildId]);
-  await pool.query(`DELETE FROM items WHERE guild_id=$1`, [guildId]);
+  await pool.query(`DELETE FROM votes   WHERE guild_id=$1`, [guildId]);
+  await pool.query(`DELETE FROM items   WHERE guild_id=$1`, [guildId]);
+  await pool.query(`DELETE FROM winners WHERE guild_id=$1`, [guildId]); // ✅ Wins resetten
   await clearWindow(guildId);
   clearWipeTimer(guildId);
-  console.log(`[Auto-Wipe] ${guildId}: Votes + Items geleert.`);
+  console.log(`[Auto-Wipe] ${guildId}: Votes + Items + Winners geleert.`);
 }
 async function scheduleWipeIfNeeded(guildId) {
   clearWipeTimer(guildId);
@@ -248,7 +249,7 @@ async function showVotes(guildId, itemNameInput) {
   }
 }
 
-/* ===== Fairness: Wins im aktuellen Fenster ===== */
+/* ===== Fairness: Wins im aktuellen 48h-Fenster ===== */
 async function countWinsInCurrentWindow(guildId, userId) {
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS wins
@@ -307,6 +308,7 @@ async function rollForItem(guild, guildId, itemInput) {
   );
   if (rows.length === 0) return { displayItemName: displayName, winner: null, lines: null };
 
+  // resolve: reason, displayName, roll, wins
   const resolved = [];
   for (const r of rows) {
     let type = "litho";
@@ -339,7 +341,7 @@ async function rollForItem(guild, guildId, itemInput) {
   const lines = buildRankingLines(resolved);
   const winner = resolved[0];
 
-  // Sieger speichern mit aktuellem Fensterende (wenn vorhanden)
+  // Sieger speichern mit aktuellem Fensterende
   const windowEnd = await getWindowEnd(guildId);
   if (windowEnd) {
     await pool.query(
@@ -347,10 +349,10 @@ async function rollForItem(guild, guildId, itemInput) {
        VALUES ($1,$2,$3,$4)`,
       [guildId, slug, winner.userId, windowEnd.toISOString()]
     );
+    // Für die Anzeige direkt auf den neuen Wert erhöhen
+    winner.wins = (winner.wins || 0) + 1;
   }
-  // Für die Anzeige: neue Wins (altes +1)
-  winner.wins = winner.wins + 1;
-  
+
   return { displayItemName: displayName, winner, lines };
 }
 
@@ -402,7 +404,7 @@ client.once("ready", async () => {
   await initDB();
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e?.message || e); }
 
-  // laufendes Fenster reaktivieren (Timer)
+  // laufendes Fenster (Timer) reaktivieren
   const { rows } = await pool.query(
     `SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`
   );
@@ -459,7 +461,7 @@ client.on("interactionCreate", async (interaction) => {
         }
         await wipeGuildVotes(guildId);
         return interaction.reply({
-          content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.",
+          content: "🧹 Alle Votes und Gewinner/Wins wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.",
           ephemeral: false
         });
       }
@@ -487,7 +489,7 @@ client.on("interactionCreate", async (interaction) => {
 
         const embed = new EmbedBuilder()
           .setTitle(`🎲 Würfelrunde für **${displayItemName}**`)
-          .setDescription(`${lines}\n\n🏆 Gewinner: ${winner.displayName} (${reasonEmojiLabel(winner.type)})`);
+          .setDescription(`${lines}\n\n🏆 Gewinner: ${winner.displayName} (${reasonEmojiLabel(winner.type)} | ${winner.wins}W)`);
 
         return interaction.reply({ embeds: [embed] });
       }
