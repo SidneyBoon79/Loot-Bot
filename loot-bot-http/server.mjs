@@ -1,12 +1,13 @@
-// server.mjs — Discord Interactions (Serverless, HTTP only)
-// - Verifiziert Signaturen (Public Key)
-// - Routet Slash-Commands zu /commands/*
-// - Bietet Dropdown-UI für /roll (offene Items mit Votes, 48h)
-// - Handhabt Component-Interaktionen (roll:select)
+// server.mjs — Discord Interactions (HTTP only)
+// - Verifiziert Signatur
+// - Slash: /vote öffnet Modal (Item)
+// - Modal-Submit → ephemere Message mit Dropdown (Gear/Trait/Litho)
+// - Component (vote:grund:*) → Vote speichern
+// - /roll Dropdown bleibt; /winner, /reducew etc. unverändert
 
 import express from "express";
-import di from "discord-interactions"; // CJS: default import
-import { REST, Routes, PermissionFlagsBits } from "discord.js";
+import di from "discord-interactions";
+import { REST, Routes } from "discord.js";
 import pkg from "pg";
 const { Pool } = pkg;
 
@@ -30,17 +31,20 @@ if (!PUBLIC_KEY || !CLIENT_ID || !BOT_TOKEN || !DATABASE_URL) {
 // ===== DB =====
 const pool = new Pool({ connectionString: DATABASE_URL });
 
-// ===== Commands laden =====
+// ===== Commands (Logik) =====
 import * as cmdVote       from "./commands/vote.mjs";
 import * as cmdVoteShow   from "./commands/vote-show.mjs";
 import * as cmdVoteRemove from "./commands/vote-remove.mjs";
 import * as cmdVoteClear  from "./commands/vote-clear.mjs";
+import * as cmdVoteInfo   from "./commands/vote-info.mjs";
 import * as cmdRoll       from "./commands/roll.mjs";
-import * as cmdVoteInfo   from "./commands/vote-info.mjs"; // dein Tutorial
+import * as cmdRollAll    from "./commands/roll-all.mjs";
+import * as cmdWinner     from "./commands/winner.mjs";
+import * as cmdReduceW    from "./commands/reducew.mjs";
 
-// Noch nicht migrierte Commands werden über Fallback beantwortet
 const implemented = new Set([
-  "vote", "vote-show", "vote-remove", "vote-clear", "roll", "vote-info"
+  "vote", "vote-show", "vote-remove", "vote-clear", "vote-info",
+  "roll", "roll-all", "winner", "reducew"
 ]);
 
 // ===== Helpers =====
@@ -52,7 +56,6 @@ function makeCtx({ interaction, res }) {
   const restWebhook = new REST({ version: "10" }).setToken(BOT_TOKEN);
 
   const reply = async (content, { ephemeral = true } = {}) => {
-    // Default ephemer (bei Bedarf {ephemeral:false})
     const data = typeof content === "string" ? { content } : content;
     const flags = ephemeral ? EPHEMERAL : undefined;
     return res.send({
@@ -64,24 +67,21 @@ function makeCtx({ interaction, res }) {
   const followUp = async (content, { ephemeral = false } = {}) => {
     const data = typeof content === "string" ? { content } : content;
     const flags = ephemeral ? EPHEMERAL : undefined;
-    await restWebhook.post(
-      Routes.webhook(CLIENT_ID, token),
-      { body: { ...data, flags } }
-    );
+    await restWebhook.post(Routes.webhook(CLIENT_ID, token), { body: { ...data, flags } });
   };
 
   const requireMod = () => {
     const permsStr = interaction.member?.permissions ?? "0";
-    const has = (BigInt(permsStr) & BigInt(PermissionFlagsBits.ManageGuild)) !== 0n;
+    const has = (BigInt(permsStr) & 32n) === 32n; // ManageGuild
     if (!has) {
-      const err = new Error("Nur Moderation (Manage Server) erlaubt.");
-      err.status = 403;
+      const err = new Error("Nur für Mods (Manage Guild).");
+      err.status = 200;
       throw err;
     }
   };
 
   return {
-    guildId, userId,
+    guildId, userId, token,
     options: interaction.data?.options ?? [],
     reply, followUp,
     db: pool,
@@ -90,57 +90,35 @@ function makeCtx({ interaction, res }) {
   };
 }
 
+// Kleine Utils
 function indexByName(options = []) {
   const map = Object.create(null);
   for (const o of options) map[o.name] = o;
   return map;
 }
-
-// Dropdown-Datenquelle für /roll
-async function openItemsWithVotes(db, guildId) {
-  const { rows } = await db.query(
-    `
-    WITH windowed AS (
-      SELECT * FROM votes
-       WHERE guild_id=$1 AND created_at > NOW() - INTERVAL '48 hours'
-    )
-    SELECT i.item_name,
-           COALESCE(SUM(CASE WHEN w.item_name IS NOT NULL THEN 1 ELSE 0 END),0)::int AS c_votes
-      FROM items i
- LEFT JOIN windowed w
-        ON w.guild_id=i.guild_id AND w.item_name=i.item_name
-     WHERE i.guild_id=$1 AND i.rolled=FALSE
-  GROUP BY i.item_name
-    HAVING COALESCE(SUM(CASE WHEN w.item_name IS NOT NULL THEN 1 ELSE 0 END),0) > 0
-  ORDER BY i.item_name ASC
-    `,
-    [guildId]
-  );
-  return rows;
+function b64uEncode(s) {
+  return Buffer.from(s, "utf8").toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 }
-
+function b64uDecode(s) {
+  s = s.replace(/-/g,"+").replace(/_/g,"/");
+  const pad = s.length % 4 ? 4 - (s.length % 4) : 0;
+  return Buffer.from(s + "=".repeat(pad), "base64").toString("utf8");
+}
 function asStringSelect(placeholder, customId, optionsArr) {
   return {
     type: 1, // Action Row
     components: [
-      {
-        type: 3, // StringSelect
-        custom_id: customId,
-        placeholder,
-        min_values: 1,
-        max_values: 1,
-        options: optionsArr
-      }
+      { type: 3, custom_id: customId, placeholder, min_values: 1, max_values: 1, options: optionsArr }
     ]
   };
 }
 
 // ===== Express =====
 const app = express();
+app.use(express.json({ type: "*/*" })); // falls nötig
 
 app.get("/", (_req, res) => res.status(200).send("ok"));
 
-// Haupt-Endpoint (Discord Signaturprüfung)
 app.post(
   "/interactions",
   verifyKeyMiddleware(PUBLIC_KEY),
@@ -159,54 +137,52 @@ app.post(
         const ctx  = makeCtx({ interaction: i, res });
 
         switch (name) {
-          case "vote":
-            return cmdVote.run(ctx);
+          case "vote": {
+            // Variante B: Modal öffnen (Item-Eingabe)
+            const modal = cmdVote.makeVoteModal();
+            return res.send({ type: InteractionResponseType.MODAL, data: modal });
+          }
 
-          case "vote-show":
-            // öffentliche Übersicht (wie in Datei konfiguriert)
-            return cmdVoteShow.run(ctx);
-
-          case "vote-remove":
-            return cmdVoteRemove.run(ctx);
-
-          case "vote-clear":
-            return cmdVoteClear.run(ctx);
-
-          case "vote-info":
-            return cmdVoteInfo.run(ctx);
+          case "vote-show":   return cmdVoteShow.run(ctx);
+          case "vote-remove": return cmdVoteRemove.run(ctx);
+          case "vote-clear":  return cmdVoteClear.run(ctx);
+          case "vote-info":   return cmdVoteInfo.run(ctx);
 
           case "roll": {
-            // Wenn dein Registrar noch keine "item"-Option hat:
-            // → Dropdown mit offenen Items anbieten
             const opt = indexByName(ctx.options);
             const passedItem = opt.item?.value?.trim();
-
             if (!passedItem) {
               ctx.requireMod?.();
-              const items = await openItemsWithVotes(ctx.db, ctx.guildId);
-              if (items.length === 0) {
+              // (bestehende Dropdown-Logik aus deiner Datei bleibt unverändert)
+              const { rows: items } = await pool.query(
+                `SELECT i.item_name, COUNT(v.*) AS c_votes
+                   FROM items i
+                   JOIN votes v
+                     ON v.guild_id = i.guild_id
+                    AND v.item_name = i.item_name
+                    AND v.created_at >= NOW() - INTERVAL '48 hours'
+                  WHERE i.guild_id = $1 AND i.rolled = FALSE
+                  GROUP BY 1 HAVING COUNT(v.*) > 0
+                  ORDER BY 1 ASC LIMIT 25`,
+                [ctx.guildId]
+              );
+              if (!items.length) {
                 return ctx.reply("Keine **offenen Items mit Votes** im 48h-Fenster gefunden. ✅", { ephemeral: true });
               }
-              const optionsArr = items.slice(0, 25).map(r => ({
-                label: `${r.item_name}`,
-                value: r.item_name,
-                description: `${r.c_votes} Votes`
-              }));
-
+              const optionsArr = items.map(r => ({ label: `${r.item_name}`, value: r.item_name, description: `${r.c_votes} Votes` }));
               return ctx.reply(
-                {
-                  content: "Wähle ein Item für den manuellen Roll:",
-                  components: [asStringSelect("Item auswählen …", "roll:select", optionsArr)]
-                },
+                { content: "Wähle ein Item für den manuellen Roll:",
+                  components: [asStringSelect("Item auswählen …", "roll:select", optionsArr)] },
                 { ephemeral: true }
               );
             }
-
-            // Wenn Option vorhanden: direkt rollen
             return cmdRoll.run(ctx);
           }
 
-          // Noch nicht migrierte Commands
+          case "roll-all": return cmdRollAll.run(ctx);
+          case "winner":   return cmdWinner.run(ctx);
+          case "reducew":  return cmdReduceW.run(ctx);
+
           default:
             if (!implemented.has(name)) {
               return ctx.reply(`\`/${name}\` ist noch nicht migriert – kommt gleich.`, { ephemeral: true });
@@ -217,34 +193,40 @@ app.post(
 
       // 3) Component Interactions (Dropdowns/Buttons)
       if (i.type === InteractionType.MESSAGE_COMPONENT) {
-        const customId = i.data?.custom_id;
+        const customId = i.data?.custom_id || "";
         const ctx = makeCtx({ interaction: i, res });
 
-        // Dropdown aus /roll
+        // /roll Dropdown
         if (customId === "roll:select") {
           ctx.requireMod?.();
           const selected = i.data?.values?.[0];
-          if (!selected) {
-            return ctx.reply("Kein Item gewählt.", { ephemeral: true });
-          }
-
-          // Fake-Options für cmdRoll: so als käme /roll item:<selected>
-          const forgedCtx = {
-            ...ctx,
-            options: [{ name: "item", value: selected }]
-          };
-
-          // cmdRoll wird:
-          // - öffentlich das Ranking per followUp posten
-          // - ephemer bestätigen
+          if (!selected) return ctx.reply("Kein Item gewählt.", { ephemeral: true });
+          const forgedCtx = { ...ctx, options: [{ name: "item", value: selected }] };
           return cmdRoll.run(forgedCtx);
         }
 
-        // Fallback für unbekannte Components
+        // /vote Grund-Dropdown (custom_id: vote:grund:<b64u(item)>)
+        if (customId.startsWith("vote:grund:")) {
+          const encoded = customId.slice("vote:grund:".length);
+          const item = b64uDecode(encoded).trim();
+          const reason = i.data?.values?.[0];
+          return cmdVote.handleReasonSelect({ ...ctx, item, reason });
+        }
+
         return ctx.reply("Unbekannte UI-Interaktion.", { ephemeral: true });
       }
 
-      // 4) Andere Typen (Autocomplete etc.) – ignorieren
+      // 4) Modal Submit
+      if (i.type === InteractionType.MODAL_SUBMIT) {
+        const ctx = makeCtx({ interaction: i, res });
+        if (i.data?.custom_id === "vote:modal") {
+          // Liest Item aus dem Modal und liefert Dropdown zurück
+          return cmdVote.handleModalSubmit(ctx);
+        }
+        return ctx.reply("Unbekanntes Modal.", { ephemeral: true });
+      }
+
+      // 5) Fallback
       return res.send({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
         data: { content: "Interaktionstyp (noch) nicht unterstützt.", flags: EPHEMERAL }
