@@ -1,4 +1,4 @@
-// index.js — Votes + Roll (clean schema: item_name_first only)
+// index.js — Votes + Roll + Fairness (item_name_first only; Sort: Grund > Wins(48h) > Roll)
 
 import {
   Client, GatewayIntentBits, Partials,
@@ -22,13 +22,14 @@ if (!TOKEN || !DATABASE_URL) {
 
 /* ===== CONSTANTS ===== */
 const WINDOW_MS = 48 * 60 * 60 * 1000; // 48h
+const REASON_WEIGHT = { gear: 3, trait: 2, litho: 1 }; // Sort-Priorität
 const guildTimers = new Map();
 
 /* ===== DB ===== */
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 async function initDB() {
-  // votes: uses item_name_first only
+  // Votes (nutzt item_name_first)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS votes (
       id SERIAL PRIMARY KEY,
@@ -42,7 +43,7 @@ async function initDB() {
     );
   `);
 
-  // items: canonical first-seen name
+  // Items (kanonischer Erstname)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
       guild_id TEXT NOT NULL,
@@ -54,16 +55,32 @@ async function initDB() {
   await pool.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS item_name_first TEXT;`);
   await pool.query(`UPDATE items SET item_name_first = item_slug WHERE item_name_first IS NULL;`);
 
-  // settings: 48h window end
+  // Settings (Fensterende)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       guild_id TEXT PRIMARY KEY,
       window_end_at TIMESTAMPTZ
     );
   `);
+
+  // Winners (für Fairness-Sortierung nach Wins im aktuellen Fenster)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS winners (
+      id SERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      item_slug TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      won_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      window_end_at TIMESTAMPTZ NOT NULL
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS winners_guild_user_window_idx
+      ON winners (guild_id, user_id, window_end_at);
+  `);
 }
 
-/* ===== Helpers ===== */
+/* ===== Utils ===== */
 function slugify(s) {
   return String(s || "")
     .toLowerCase()
@@ -99,14 +116,12 @@ async function ensureCanonicalItem(guildId, inputName) {
   return { slug, displayName };
 }
 
-/* ===== Window Handling ===== */
 async function getWindowEnd(guildId) {
   const { rows } = await pool.query(
     `SELECT window_end_at FROM settings WHERE guild_id=$1`, [guildId]
   );
   return rows[0]?.window_end_at ? new Date(rows[0].window_end_at) : null;
 }
-
 async function setWindowEnd(guildId, date) {
   await pool.query(
     `INSERT INTO settings (guild_id, window_end_at)
@@ -115,16 +130,13 @@ async function setWindowEnd(guildId, date) {
     [guildId, date.toISOString()]
   );
 }
-
 async function clearWindow(guildId) {
   await pool.query(`UPDATE settings SET window_end_at=NULL WHERE guild_id=$1`, [guildId]);
 }
-
 function clearWipeTimer(guildId) {
   const t = guildTimers.get(guildId);
   if (t) { clearTimeout(t); guildTimers.delete(guildId); }
 }
-
 async function wipeGuildVotes(guildId) {
   await pool.query(`DELETE FROM votes WHERE guild_id=$1`, [guildId]);
   await pool.query(`DELETE FROM items WHERE guild_id=$1`, [guildId]);
@@ -132,7 +144,6 @@ async function wipeGuildVotes(guildId) {
   clearWipeTimer(guildId);
   console.log(`[Auto-Wipe] ${guildId}: Votes + Items geleert.`);
 }
-
 async function scheduleWipeIfNeeded(guildId) {
   clearWipeTimer(guildId);
   const end = await getWindowEnd(guildId);
@@ -144,7 +155,6 @@ async function scheduleWipeIfNeeded(guildId) {
   }, msLeft);
   guildTimers.set(guildId, timer);
 }
-
 async function ensureWindowActive(guildId) {
   const end = await getWindowEnd(guildId);
   if (!end || end.getTime() <= Date.now()) {
@@ -153,7 +163,6 @@ async function ensureWindowActive(guildId) {
     await scheduleWipeIfNeeded(guildId);
   }
 }
-
 async function windowStillActive(guildId) {
   const end = await getWindowEnd(guildId);
   return !!end && end.getTime() > Date.now();
@@ -161,18 +170,16 @@ async function windowStillActive(guildId) {
 
 /* ===== Votes ===== */
 async function pruneEmptyItems(guildId) {
-  await pool.query(
-    `DELETE FROM items i
-      WHERE i.guild_id = $1
-        AND NOT EXISTS (
-          SELECT 1 FROM votes v
-           WHERE v.guild_id = i.guild_id
-             AND v.item_slug = i.item_slug
-        )`,
-    [guildId]
-  );
+  await pool.query(`
+    DELETE FROM items i
+    WHERE i.guild_id = $1
+      AND NOT EXISTS (
+        SELECT 1 FROM votes v
+        WHERE v.guild_id = i.guild_id
+          AND v.item_slug = i.item_slug
+      )
+  `, [guildId]);
 }
-
 async function addVoteIfNew(guildId, itemNameInput, type, userId) {
   const t = String(type || "").toLowerCase();
   if (!["gear","trait","litho"].includes(t)) throw new Error("Ungültiger Grund");
@@ -193,7 +200,6 @@ async function addVoteIfNew(guildId, itemNameInput, type, userId) {
   );
   return { isNew, value: rows[0].total, displayName };
 }
-
 async function removeUserVotes(guildId, itemNameInput, userId) {
   const { slug } = await ensureCanonicalItem(guildId, itemNameInput);
   const res = await pool.query(
@@ -203,7 +209,6 @@ async function removeUserVotes(guildId, itemNameInput, userId) {
   await pruneEmptyItems(guildId);
   return res.rowCount;
 }
-
 async function showVotes(guildId, itemNameInput) {
   if (itemNameInput) {
     const { slug } = await ensureCanonicalItem(guildId, itemNameInput);
@@ -243,59 +248,65 @@ async function showVotes(guildId, itemNameInput) {
   }
 }
 
-/* ===== Roll ===== */
-const REASON_WEIGHT = { gear: 3, trait: 2, litho: 1 };
+/* ===== Fairness: Wins im aktuellen Fenster ===== */
+async function countWinsInCurrentWindow(guildId, userId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS wins
+       FROM winners
+      WHERE guild_id = $1
+        AND user_id = $2
+        AND NOW() < window_end_at`,
+    [guildId, userId]
+  );
+  return rows[0]?.wins ?? 0;
+}
 
+/* ===== Roll ===== */
 function reasonEmojiLabel(t) {
   if (t === "gear") return "⚔️ Gear";
   if (t === "trait") return "💠 Trait";
   if (t === "litho") return "📜 Litho";
   return t;
 }
-
 function medalForIndex(idx) {
   if (idx === 0) return "🥇";
   if (idx === 1) return "🥈";
   if (idx === 2) return "🥉";
-  const map = { 3:"4️⃣", 4:"5️⃣", 5:"6️⃣", 6:"7️⃣", 7:"8️⃣", 8:"9️⃣", 9:"🔟" };
-  return map[idx] || `${idx+1}.`;
+  const map = { 3: "4️⃣", 4: "5️⃣", 5: "6️⃣", 6: "7️⃣", 7: "8️⃣", 8: "9️⃣", 9: "🔟" };
+  return map[idx] || `${idx + 1}.`;
 }
-
 function buildRankingLines(sorted) {
   return sorted.map((row, i) =>
-    `${medalForIndex(i)} ${row.displayName} — ${row.roll} (${reasonEmojiLabel(row.type)})`
+    `${medalForIndex(i)} ${row.displayName} — ${row.roll} (${reasonEmojiLabel(row.type)} | ${row.wins}W)`
   ).join("\n");
 }
 
 /**
- * Roll logic:
- * - take best reason per user (Gear > Trait > Litho)
- * - one roll per user (1..100)
- * - sort by reason priority first, then roll desc
+ * /roll-Logik:
+ * - pro User bester Grund (Gear > Trait > Litho)
+ * - 1 Roll (1..100)
+ * - Sort: Grund (desc) > Wins im Fenster (asc) > Roll (desc)
+ * - Sieger wird in winners gespeichert (mit aktuellem window_end_at)
  */
 async function rollForItem(guild, guildId, itemInput) {
   const { slug, displayName } = await ensureCanonicalItem(guildId, itemInput);
 
-  // Get best reason per user via SQL aggregation
+  // alle Voter holen + besten Grund je User bestimmen (per Aggregation)
   const { rows } = await pool.query(
     `
-    SELECT user_id,
-           MAX(CASE type WHEN 'gear' THEN 3 WHEN 'trait' THEN 2 WHEN 'litho' THEN 1 ELSE 0 END) AS w,
-           BOOL_OR(type='gear')  AS has_gear,
-           BOOL_OR(type='trait') AS has_trait,
-           BOOL_OR(type='litho') AS has_litho
-      FROM votes
-     WHERE guild_id=$1 AND item_slug=$2
-  GROUP BY user_id
+      SELECT user_id,
+             MAX(CASE type WHEN 'gear' THEN 3 WHEN 'trait' THEN 2 WHEN 'litho' THEN 1 ELSE 0 END) AS w,
+             BOOL_OR(type='gear')  AS has_gear,
+             BOOL_OR(type='trait') AS has_trait,
+             BOOL_OR(type='litho') AS has_litho
+        FROM votes
+       WHERE guild_id=$1 AND item_slug=$2
+    GROUP BY user_id
     `,
     [guildId, slug]
   );
+  if (rows.length === 0) return { displayItemName: displayName, winner: null, lines: null };
 
-  if (rows.length === 0) {
-    return { displayItemName: displayName, winner: null, lines: null };
-  }
-
-  // Resolve chosen reason per user from w/flags, fetch display names, roll
   const resolved = [];
   for (const r of rows) {
     let type = "litho";
@@ -308,20 +319,36 @@ async function rollForItem(guild, guildId, itemInput) {
     try {
       const m = await guild.members.fetch(r.user_id);
       displayNameU = m?.displayName || m?.user?.username || displayNameU;
-    } catch { /* user might not be in guild */ }
+    } catch {}
 
     const roll = Math.floor(Math.random() * 100) + 1;
-    resolved.push({ userId: r.user_id, type, displayName: displayNameU, roll });
+    const wins = await countWinsInCurrentWindow(guildId, r.user_id);
+
+    resolved.push({ userId: r.user_id, type, displayName: displayNameU, roll, wins });
   }
 
+  // Sort: Grund > Wins(asc) > Roll(desc)
   resolved.sort((a, b) => {
-    const dw = (REASON_WEIGHT[b.type] ?? 0) - (REASON_WEIGHT[a.type] ?? 0);
-    if (dw !== 0) return dw;
+    const byReason = (REASON_WEIGHT[b.type] ?? 0) - (REASON_WEIGHT[a.type] ?? 0);
+    if (byReason !== 0) return byReason;
+    const byWins = a.wins - b.wins;
+    if (byWins !== 0) return byWins;
     return b.roll - a.roll;
   });
 
   const lines = buildRankingLines(resolved);
   const winner = resolved[0];
+
+  // Sieger speichern mit aktuellem Fensterende (wenn vorhanden)
+  const windowEnd = await getWindowEnd(guildId);
+  if (windowEnd) {
+    await pool.query(
+      `INSERT INTO winners (guild_id, item_slug, user_id, window_end_at)
+       VALUES ($1,$2,$3,$4)`,
+      [guildId, slug, winner.userId, windowEnd.toISOString()]
+    );
+  }
+
   return { displayItemName: displayName, winner, lines };
 }
 
@@ -372,6 +399,23 @@ client.once("ready", async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await initDB();
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e?.message || e); }
+
+  // laufendes Fenster reaktivieren (Timer)
+  const { rows } = await pool.query(
+    `SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`
+  );
+  for (const r of rows) {
+    const end = new Date(r.window_end_at);
+    if (end.getTime() <= Date.now()) {
+      await wipeGuildVotes(r.guild_id);
+    } else {
+      const msLeft = end.getTime() - Date.now();
+      const timer = setTimeout(async () => {
+        try { await wipeGuildVotes(r.guild_id); } finally { guildTimers.delete(r.guild_id); }
+      }, msLeft);
+      guildTimers.set(r.guild_id, timer);
+    }
+  }
 });
 
 /* ===== Interactions ===== */
@@ -381,21 +425,19 @@ client.on("interactionCreate", async (interaction) => {
       const guild = interaction.guild;
       const guildId = interaction.guildId;
 
-      // /vote -> open modal
+      // /vote -> Modal öffnen
       if (interaction.commandName === "vote") {
         await ensureWindowActive(guildId);
 
         const modal = new ModalBuilder()
           .setCustomId("voteItemModal")
           .setTitle("Vote abgeben");
-
         const itemInput = new TextInputBuilder()
           .setCustomId("itemName")
           .setLabel("Item-Name")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setPlaceholder("z. B. Schwert");
-
         modal.addComponents(new ActionRowBuilder().addComponents(itemInput));
         return interaction.showModal(modal);
       }
@@ -407,7 +449,7 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: out, ephemeral: false });
       }
 
-      // /vote-clear
+      // /vote-clear (Mods)
       if (interaction.commandName === "vote-clear") {
         const perms = interaction.memberPermissions;
         if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
@@ -449,7 +491,7 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    // Modal submit -> select exactly one reason
+    // Modal -> Auswahlmenü (genau ein Grund)
     if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
       const item = interaction.fields.getTextInputValue("itemName");
       const guildId = interaction.guildId;
@@ -474,7 +516,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // Select -> store vote
+    // Auswahl -> Vote speichern
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
       const itemInput = interaction.customId.slice("voteType:".length);
       const guildId = interaction.guildId;
