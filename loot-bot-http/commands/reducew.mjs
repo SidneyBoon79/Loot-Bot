@@ -1,64 +1,97 @@
-// commands/reducew.mjs
-// /reducew – reduziert die Wins eines Users um <anzahl> (Mods only, nie unter 0)
+// commands/reducew.mjs — Mod-Only: User mit Wins auswählen, dann per Modal Anzahl reduzieren (niemals < 0)
 
-function indexByName(options = []) {
-  const map = Object.create(null);
-  for (const o of options) map[o.name] = o;
-  return map;
-}
+function fmt(n){ return new Intl.NumberFormat("de-DE").format(Number(n)||0); }
 
 export async function run(ctx) {
   ctx.requireMod?.();
 
-  const opt = indexByName(ctx.options);
-  const user = opt.user?.value;      // Discord User-ID
-  const amount = Number(opt.anzahl?.value ?? 0);
+  // User mit Win-Count > 0
+  const { rows } = await ctx.db.query(
+    `SELECT user_id, win_count
+       FROM wins
+      WHERE guild_id=$1
+        AND win_count > 0
+      ORDER BY user_id ASC
+      LIMIT 25`,
+    [ctx.guildId]
+  );
 
-  if (!user) {
-    return ctx.reply("Bitte einen **User** auswählen.", { ephemeral: true });
+  if (!rows.length) {
+    return ctx.reply("Keine User mit Wins gefunden. ✅", { ephemeral: true });
   }
-  if (!Number.isInteger(amount) || amount <= 0) {
-    return ctx.reply("Bitte eine **Anzahl ≥ 1** angeben.", { ephemeral: true });
-  }
 
-  await ensureSchema(ctx.db);
+  const optionsArr = rows.map(r => ({
+    label: `@${r.user_id} · (W${fmt(r.win_count)})`,
+    value: r.user_id,
+    description: `Wins: ${fmt(r.win_count)}`
+  }));
 
-  // Upsert + Decrement, nie unter 0
-  const q = `
-    INSERT INTO wins (guild_id, user_id, win_count, updated_at)
-    VALUES ($1, $2, 0, NOW())
-    ON CONFLICT (guild_id, user_id)
-    DO UPDATE SET
-      win_count = GREATEST(wins.win_count - $3, 0),
-      updated_at = NOW()
-    RETURNING win_count
-  `;
-  const params = [ctx.guildId, user, amount];
+  const select = {
+    type: 1,
+    components: [
+      { type: 3, custom_id: "reducew:select", placeholder: "User auswählen …", min_values: 1, max_values: 1, options: optionsArr }
+    ]
+  };
 
-  try {
-    const { rows } = await ctx.db.query(q, params);
-    const newCount = rows[0]?.win_count ?? 0;
-
-    // Ephemer für Mod, klar und knapp
-    return ctx.reply(
-      `Wins von <@${user}> um **${amount}** reduziert. Neuer Stand: **${newCount}W**.`,
-      { ephemeral: true }
-    );
-  } catch (err) {
-    console.error("/reducew error:", err);
-    return ctx.reply("❌ Konnte die Wins nicht anpassen. Versuch’s später nochmal.", { ephemeral: true });
-  }
+  return ctx.reply({ content: "Wähle den User, dessen Wins du reduzieren willst:", components: [select] }, { ephemeral: true });
 }
 
-async function ensureSchema(db) {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS wins (
-      guild_id   TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      win_count  INTEGER NOT NULL DEFAULT 0,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (guild_id, user_id)
-    );
-  `);
+// Modal definieren
+export function makeModal(userId) {
+  return {
+    custom_id: "reducew:modal",
+    title: "Wins reduzieren",
+    components: [
+      {
+        type: 1,
+        components: [
+          { type: 4, custom_id: "reducew:user", style: 1, label: "User ID", value: userId, required: true }
+        ]
+      },
+      {
+        type: 1,
+        components: [
+          { type: 4, custom_id: "reducew:count", style: 1, label: "Anzahl (mind. 1)", placeholder: "1", required: true }
+        ]
+      }
+    ]
+  };
 }
 
+export async function handleModalSubmit(ctx) {
+  const comps = ctx.interaction?.data?.components ?? [];
+  const userComp  = comps[0]?.components?.[0];
+  const countComp = comps[1]?.components?.[0];
+
+  const targetUser = (userComp?.value || "").trim();
+  const rawCount   = (countComp?.value || "").trim();
+  const delta = Math.max(1, Math.floor(Number(rawCount)));
+
+  if (!targetUser) return ctx.followUp("User fehlt.", { ephemeral: true });
+  if (!Number.isFinite(delta) || delta < 1) return ctx.followUp("Ungültige Anzahl.", { ephemeral: true });
+
+  // aktuelle Wins holen
+  const cur = await ctx.db.query(
+    `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
+    [ctx.guildId, targetUser]
+  );
+  const before = cur.rows[0]?.win_count ?? 0;
+  const after  = Math.max(0, Number(before) - delta);
+
+  // Update
+  if (cur.rowCount === 0) {
+    // nichts zu reduzieren
+    await ctx.followUp(`User <@${targetUser}> hat (W0). Nichts zu tun.`, { ephemeral: true });
+    return;
+  }
+
+  await ctx.db.query(
+    `UPDATE wins
+        SET win_count = $3,
+            updated_at = NOW()
+      WHERE guild_id=$1 AND user_id=$2`,
+    [ctx.guildId, targetUser, after]
+  );
+
+  return ctx.followUp(`Wins für <@${targetUser}> um ${delta} reduziert. Neuer Stand: (W${fmt(after)})`, { ephemeral: true });
+}
