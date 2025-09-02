@@ -9,6 +9,7 @@
   "dependencies": {
     "discord-interactions": "^3.3.0",
     "discord.js": "^14.15.2",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
   }
 }
