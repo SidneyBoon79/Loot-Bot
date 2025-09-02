@@ -1,4 +1,4 @@
-// server.mjs — HTTP Interactions (Modal + Dropdown) mit Legacy-DB-Support + Defer-Helper
+// server.mjs — HTTP Interactions (Legacy-DB, Modal-/Dropdown-Flow, Defer-Safe)
 import express from "express";
 import di from "discord-interactions";
 import { REST, Routes } from "discord.js";
@@ -64,7 +64,6 @@ function makeCtx({ interaction, res }) {
   };
 
   const defer = async ({ ephemeral = false } = {}) => {
-    // Sofort-ACK (Timeout-Safe)
     return res.send({
       type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
       data: { flags: ephemeral ? EPHEMERAL : undefined }
@@ -74,11 +73,7 @@ function makeCtx({ interaction, res }) {
   const requireMod = () => {
     const permsStr = interaction.member?.permissions ?? "0";
     const has = (BigInt(permsStr) & 32n) === 32n; // ManageGuild
-    if (!has) {
-      const err = new Error("Nur für Mods (Manage Guild).");
-      err.status = 200;
-      throw err;
-    }
+    if (!has) { const err = new Error("Nur für Mods (Manage Guild)."); err.status = 200; throw err; }
   };
 
   return {
@@ -96,50 +91,9 @@ function indexByName(options = []) {
   for (const o of options) map[o.name] = o;
   return map;
 }
-function b64uEncode(s) { return Buffer.from(s, "utf8").toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
-function b64uDecode(s) { s = s.replace(/-/g,"+").replace(/_/g,"/"); const pad = s.length % 4 ? 4 - (s.length % 4) : 0; return Buffer.from(s + "=".repeat(pad), "base64").toString("utf8"); }
+
 function asStringSelect(placeholder, customId, optionsArr) {
   return { type: 1, components: [ { type: 3, custom_id: customId, placeholder, min_values: 1, max_values: 1, options: optionsArr } ] };
-}
-
-// ===== Auto-Migration (minimal & idempotent für dein Schema) =====
-let migratedOnce = false;
-async function ensureMigrations(db) {
-  if (migratedOnce) return;
-
-  // votes: sicherstellen, dass die "neuen" Spalten existieren (ohne alte kaputt zu machen)
-  await db.query(`CREATE TABLE IF NOT EXISTS votes (
-    id SERIAL PRIMARY KEY
-  );`);
-  await db.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS guild_id TEXT;`);
-  await db.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS user_id  TEXT;`);
-  await db.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS item_slug TEXT;`);
-  await db.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS type TEXT;`);
-  await db.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS item_name_first TEXT;`);
-  await db.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS reason TEXT;`);
-  await db.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
-  await db.query(`UPDATE votes SET reason = COALESCE(reason, type) WHERE reason IS NULL;`);
-
-  // items
-  await db.query(`CREATE TABLE IF NOT EXISTS items (
-    id SERIAL PRIMARY KEY
-  );`);
-  await db.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS guild_id TEXT;`);
-  await db.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS item_slug TEXT;`);
-  await db.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS item_name_first TEXT;`);
-  await db.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS rolled_at TIMESTAMPTZ;`);
-  await db.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS rolled_by TEXT;`);
-  await db.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS rolled_manual BOOLEAN DEFAULT FALSE;`);
-
-  // wins (nur sicherstellen)
-  await db.query(`CREATE TABLE IF NOT EXISTS wins (
-    guild_id   TEXT,
-    user_id    TEXT,
-    win_count  INTEGER DEFAULT 0,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-  );`);
-
-  migratedOnce = true;
 }
 
 // ===== Express =====
@@ -148,8 +102,6 @@ app.get("/", (_req, res) => res.status(200).send("ok"));
 
 app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
   try {
-    await ensureMigrations(pool);
-
     const i = req.body;
 
     if (i.type === InteractionType.PING) {
@@ -165,41 +117,47 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
           const modal = cmdVote.makeVoteModal();
           return res.send({ type: InteractionResponseType.MODAL, data: modal });
         }
-        case "vote-show":   return cmdVoteShow.run(ctx); // run() macht eigenen defer() + followUp()
+        case "vote-show":   return cmdVoteShow.run(ctx); // macht selbst defer()
         case "vote-remove": return cmdVoteRemove.run(ctx);
         case "vote-clear":  return cmdVoteClear.run(ctx);
         case "vote-info":   return cmdVoteInfo.run(ctx);
 
         case "roll": {
           const opt = indexByName(ctx.options);
-          const passedItem = opt.item?.value?.trim();
+          const passedItem = opt.item?.value?.trim(); // (optional)
           if (!passedItem) {
             ctx.requireMod?.();
             const { rows: items } = await ctx.db.query(
-              `SELECT i.item_slug, MAX(i.item_name_first) AS item_name_first, COUNT(v.*) AS c_votes
+              `SELECT i.item_slug,
+                      MAX(i.item_name_first) AS item_name_first,
+                      BOOL_OR(i.rolled_at IS NOT NULL OR COALESCE(i.rolled_manual,false)) AS rolled,
+                      COUNT(v.*) FILTER (WHERE v.created_at >= NOW() - INTERVAL '48 hours') AS c_votes
                  FROM items i
-                 JOIN votes v
-                   ON v.guild_id = i.guild_id
-                  AND v.item_slug = i.item_slug
-                  AND v.created_at >= NOW() - INTERVAL '48 hours'
-                WHERE i.guild_id = $1 AND (i.rolled_at IS NULL)
+                 LEFT JOIN votes v
+                        ON v.guild_id = i.guild_id
+                       AND v.item_slug = i.item_slug
+                WHERE i.guild_id = $1
                 GROUP BY i.item_slug
-                HAVING COUNT(v.*) > 0
-                ORDER BY 2 ASC
+                HAVING COUNT(v.*) FILTER (WHERE v.created_at >= NOW() - INTERVAL '48 hours') > 0
+                ORDER BY item_name_first ASC
                 LIMIT 25`,
               [ctx.guildId]
             );
             if (!items.length) {
               return ctx.reply("Keine **offenen Items mit Votes** im 48h-Fenster gefunden. ✅", { ephemeral: true });
             }
-            const optionsArr = items.map(r => ({ label: `${r.item_name_first}`, value: r.item_slug, description: `${r.c_votes} Votes` }));
+            const optionsArr = items.map(r => ({
+              label: `${r.item_name_first}`,
+              value: r.item_slug,
+              description: `${r.rolled ? "🔴 bereits gerollt" : "🟢 nicht gerollt"} · ${r.c_votes} Votes`
+            }));
             return ctx.reply(
               { content: "Wähle ein Item für den manuellen Roll:",
                 components: [asStringSelect("Item auswählen …", "roll:select", optionsArr)] },
               { ephemeral: true }
             );
           }
-          return cmdRoll.run(ctx);
+          return cmdRoll.run(ctx); // falls wir später /roll item:<slug> erlauben
         }
 
         case "roll-all": return cmdRollAll.run(ctx);
@@ -218,18 +176,24 @@ app.post("/interactions", verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
 
       if (customId === "roll:select") {
         ctx.requireMod?.();
-        const selected = i.data?.values?.[0];
-        if (!selected) return ctx.reply("Kein Item gewählt.", { ephemeral: true });
-        const forgedCtx = { ...ctx, options: [{ name: "item", value: selected }] };
-        return cmdRoll.run(forgedCtx);
+        const selectedSlug = i.data?.values?.[0];
+        if (!selectedSlug) return ctx.reply("Kein Item gewählt.", { ephemeral: true });
+
+        // Sofort ack (öffentliches Ergebnis kommt gleich)
+        await ctx.defer({ ephemeral: false });
+        try {
+          await cmdRoll.run({ ...ctx, itemSlug: selectedSlug, useFollowUp: true });
+        } catch (e) {
+          await ctx.followUp(`❌ ${e.message || "Fehler beim Roll"}`, { ephemeral: true });
+        }
+        return;
       }
 
       if (customId.startsWith("vote:grund:")) {
-        const encoded = customId.slice("vote:grund:".length);
-        const item = b64uDecode(encoded).trim();
+        const enc = customId.slice("vote:grund:".length);
+        const item = Buffer.from(enc.replace(/-/g,"+").replace(/_/g,"/")+"===", "base64").toString("utf8").trim();
         const reason = i.data?.values?.[0];
 
-        // Defer sofort (Timeout-Safe)
         res.send({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, data: { flags: EPHEMERAL } });
         try { await cmdVote.handleReasonSelect({ ...ctx, item, reason, useFollowUp: true }); }
         catch (e) { await ctx.followUp(`❌ ${e.message || "Fehler beim Speichern"}`, { ephemeral: true }); }
