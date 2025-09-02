@@ -1,46 +1,36 @@
-// commands/reducew.mjs — Mod-Only: User mit Wins auswählen, dann per Modal Anzahl reduzieren (niemals < 0)
+// commands/reducew.mjs — Mod-Only: User per USER-SELECT wählen (zeigt Namen!), dann Modal für Anzahl
 
 function fmt(n){ return new Intl.NumberFormat("de-DE").format(Number(n)||0); }
 
 export async function run(ctx) {
   ctx.requireMod?.();
 
-  // User mit Win-Count > 0
-  const { rows } = await ctx.db.query(
-    `SELECT user_id, win_count
-       FROM wins
-      WHERE guild_id=$1
-        AND win_count > 0
-      ORDER BY user_id ASC
-      LIMIT 25`,
-    [ctx.guildId]
-  );
-
-  if (!rows.length) {
-    return ctx.reply("Keine User mit Wins gefunden. ✅", { ephemeral: true });
-  }
-
-  const optionsArr = rows.map(r => ({
-    label: `@${r.user_id} · (W${fmt(r.win_count)})`,
-    value: r.user_id,
-    description: `Wins: ${fmt(r.win_count)}`
-  }));
-
-  const select = {
+  // USER_SELECT statt String-Select => Discord zeigt echte Namen/Avatare
+  const userSelectRow = {
     type: 1,
     components: [
-      { type: 3, custom_id: "reducew:select", placeholder: "User auswählen …", min_values: 1, max_values: 1, options: optionsArr }
+      {
+        type: 5, // USER_SELECT
+        custom_id: "reducew:userpick",
+        placeholder: "User auswählen …",
+        min_values: 1,
+        max_values: 1
+      }
     ]
   };
 
-  return ctx.reply({ content: "Wähle den User, dessen Wins du reduzieren willst:", components: [select] }, { ephemeral: true });
+  return ctx.reply(
+    { content: "Wähle den User, dessen Wins du reduzieren willst:", components: [userSelectRow] },
+    { ephemeral: true }
+  );
 }
 
 // Modal definieren
-export function makeModal(userId) {
+export function makeModal(userId, currentWins = null) {
+  const winsHint = currentWins == null ? "" : ` (aktuell: W${fmt(currentWins)})`;
   return {
     custom_id: "reducew:modal",
-    title: "Wins reduzieren",
+    title: `Wins reduzieren${winsHint}`,
     components: [
       {
         type: 1,
@@ -78,9 +68,7 @@ export async function handleModalSubmit(ctx) {
   const before = cur.rows[0]?.win_count ?? 0;
   const after  = Math.max(0, Number(before) - delta);
 
-  // Update
-  if (cur.rowCount === 0) {
-    // nichts zu reduzieren
+  if (cur.rowCount === 0 || before <= 0) {
     await ctx.followUp(`User <@${targetUser}> hat (W0). Nichts zu tun.`, { ephemeral: true });
     return;
   }
@@ -93,5 +81,5 @@ export async function handleModalSubmit(ctx) {
     [ctx.guildId, targetUser, after]
   );
 
-  return ctx.followUp(`Wins für <@${targetUser}> um ${delta} reduziert. Neuer Stand: (W${fmt(after)})`, { ephemeral: true });
+  return ctx.followUp(`Wins für <@${targetUser}> um ${delta} reduziert. Neuer Stand: (W${after})`, { ephemeral: true });
 }
