@@ -10,16 +10,16 @@ const { Pool } = pkg;
 /** ====== ENV ====== */
 const TOKEN = process.env.TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
-const CLIENT_ID = process.env.CLIENT_ID || "";   // App ID (für Slash-Register)
-const GUILD_ID  = process.env.GUILD_ID  || "";   // optional: sofortige Guild-Registrierung
+const CLIENT_ID = process.env.CLIENT_ID || "";
+const GUILD_ID  = process.env.GUILD_ID  || "";
 if (!TOKEN || !DATABASE_URL) {
   console.error("Fehlende ENV: TOKEN und/oder DATABASE_URL");
   process.exit(1);
 }
 
 /** ====== KONSTANTEN ====== */
-const WINDOW_MS = 48 * 60 * 60 * 1000; // 48h
-const guildTimers = new Map(); // guildId -> Timeout
+const WINDOW_MS = 48 * 60 * 60 * 1000;
+const guildTimers = new Map();
 
 /** ====== DB ====== */
 const pool = new Pool({ connectionString: DATABASE_URL });
@@ -49,7 +49,7 @@ function slugify(s) {
   return s.toLowerCase().trim().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "");
 }
 
-/** ====== Fenster / Auto-Wipe (einmalig) ====== */
+/** ====== Fenster / Auto-Wipe ====== */
 async function getWindowEnd(guildId) {
   const { rows } = await pool.query(
     `SELECT window_end_at FROM settings WHERE guild_id=$1`,
@@ -85,7 +85,7 @@ function clearWipeTimer(guildId) {
 async function scheduleWipeIfNeeded(guildId) {
   clearWipeTimer(guildId);
   const end = await getWindowEnd(guildId);
-  if (!end) return; // kein aktives Fenster
+  if (!end) return;
 
   const msLeft = end.getTime() - Date.now();
   if (msLeft <= 0) {
@@ -100,7 +100,6 @@ async function scheduleWipeIfNeeded(guildId) {
 }
 
 async function ensureWindowActive(guildId) {
-  // Wenn kein Fenster aktiv → jetzt starten (48h ab jetzt) und Wipe planen
   const end = await getWindowEnd(guildId);
   if (!end || end.getTime() <= Date.now()) {
     const newEnd = new Date(Date.now() + WINDOW_MS);
@@ -134,6 +133,15 @@ async function addVoteIfNew(guildId, itemName, type, userId) {
     [guildId, slug, t]
   );
   return { isNew, value: rows[0].total };
+}
+
+async function removeUserVotes(guildId, itemName, userId) {
+  const slug = slugify(itemName);
+  const res = await pool.query(
+    `DELETE FROM votes WHERE guild_id=$1 AND item_slug=$2 AND user_id=$3`,
+    [guildId, slug, userId]
+  );
+  return res.rowCount;
 }
 
 async function showVotes(guildId, itemName) {
@@ -171,7 +179,7 @@ async function showVotes(guildId, itemName) {
   }
 }
 
-/** ====== Discord Client (nur Slash/Interactions) ====== */
+/** ====== Discord Client ====== */
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
   partials: [Partials.Channel]
@@ -192,6 +200,10 @@ async function registerSlash() {
       .toJSON(),
     new SlashCommandBuilder().setName("vote-clear")
       .setDescription("Alle Votes sofort löschen (Mods)")
+      .toJSON(),
+    new SlashCommandBuilder().setName("vote-remove")
+      .setDescription("Eigene Votes für ein Item löschen")
+      .addStringOption(o => o.setName("item").setDescription("Item-Name").setRequired(true))
       .toJSON()
   ];
 
@@ -208,111 +220,23 @@ client.once("ready", async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await initDB();
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e.message); }
-
-  // Beim Start: evtl. laufende Fenster reaktivieren
-  const { rows } = await pool.query(`SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`);
-  for (const r of rows) {
-    const end = new Date(r.window_end_at);
-    if (end.getTime() <= Date.now()) {
-      await wipeGuildVotes(r.guild_id);
-    } else {
-      const msLeft = end.getTime() - Date.now();
-      const timer = setTimeout(async () => {
-        try { await wipeGuildVotes(r.guild_id); }
-        finally { guildTimers.delete(r.guild_id); }
-      }, msLeft);
-      guildTimers.set(r.guild_id, timer);
-    }
-  }
 });
 
-// Interactions: /vote → Modal → Auswahl; /vote-show → Übersicht; /vote-clear → Reset
+// Interactions
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
       const guildId = interaction.guildId;
 
-      if (interaction.commandName === "vote") {
-        // Wenn kein aktives Fenster → automatisch starten (48h ab jetzt)
-        await ensureWindowActive(guildId);
-
-        const modal = new ModalBuilder()
-          .setCustomId("voteItemModal")
-          .setTitle("Vote abgeben");
-        const itemInput = new TextInputBuilder()
-          .setCustomId("itemName")
-          .setLabel("Item-Name")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setPlaceholder("z. B. Schwert");
-        modal.addComponents(new ActionRowBuilder().addComponents(itemInput));
-        return interaction.showModal(modal);
-      }
-
-      if (interaction.commandName === "vote-show") {
-        const item = interaction.options.getString("item") || null;
-        const out = await showVotes(guildId, item);
-        return interaction.reply({ content: out, ephemeral: false });
-      }
-
-      if (interaction.commandName === "vote-clear") {
-        // Nur Mods: ManageGuild ODER Admin
-        const perms = interaction.memberPermissions;
-        if (!perms?.has("ManageGuild") && !perms?.has("Administrator")) {
-          return interaction.reply({ content: "Nur Moderation darf das.", ephemeral: true });
+      if (interaction.commandName === "vote-remove") {
+        const item = interaction.options.getString("item");
+        const removed = await removeUserVotes(guildId, item, interaction.user.id);
+        if (removed > 0) {
+          return interaction.reply({ content: `✅ Deine Votes für **${item}** wurden entfernt.`, ephemeral: true });
+        } else {
+          return interaction.reply({ content: `⚠️ Du hattest keine Votes für **${item}**.`, ephemeral: true });
         }
-        clearWipeTimer(guildId);
-        await wipeGuildVotes(guildId);
-        return interaction.reply({ content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.", ephemeral: false });
       }
-    }
-
-    if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
-      const item = interaction.fields.getTextInputValue("itemName");
-      const guildId = interaction.guildId;
-
-      // Falls Bot neu startete: sicherstellen, dass ein Fenster aktiv ist
-      await ensureWindowActive(guildId);
-
-      const select = new StringSelectMenuBuilder()
-        .setCustomId(`voteType:${item}`)
-        .setPlaceholder("Wähle Grund/Gründe (min. 1)")
-        .addOptions(
-          { label: "Gear",  value: "gear"  },
-          { label: "Trait", value: "trait" },
-          { label: "Litho", value: "litho" }
-        )
-        .setMinValues(1).setMaxValues(3);
-
-      const row = new ActionRowBuilder().addComponents(select);
-      return interaction.reply({
-        content: `Item: **${item}** – wähle Grund/Gründe:`,
-        components: [row],
-        ephemeral: true
-      });
-    }
-
-    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
-      const item = interaction.customId.split(":")[1];
-      const guildId = interaction.guildId;
-      const userId = interaction.user.id;
-
-      // Wenn das Fenster zwischen Modal und Auswahl abgelaufen ist → wipen & abbrechen
-      if (!(await windowStillActive(guildId))) {
-        clearWipeTimer(guildId);
-        await wipeGuildVotes(guildId);
-        return interaction.update({ content: "⏱️ Das 48h-Fenster ist vorbei. Starte mit einem neuen `/vote` neu.", components: [] });
-      }
-
-      let lines = [];
-      for (const t of interaction.values) {
-        const { isNew, value } = await addVoteIfNew(guildId, item, t, userId);
-        if (isNew) lines.push(`✔️ **${t.toUpperCase()}** gezählt → **${value}**`);
-        else       lines.push(`⚠️ **${t.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`);
-      }
-
-      const summary = await showVotes(guildId, item);
-      return interaction.update({ content: `${lines.join("\n")}\n\n${summary}`, components: [] });
     }
   } catch (e) {
     console.error(e);
