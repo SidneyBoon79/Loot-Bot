@@ -1,4 +1,4 @@
-// index.js (verbose + canonical names + exact-one reason)
+// index.js — canonical names (erste Schreibweise), exact-one reason, 48h window
 import {
   Client, GatewayIntentBits, Partials,
   REST, Routes, SlashCommandBuilder,
@@ -27,7 +27,7 @@ const guildTimers = new Map(); // guildId -> Timeout
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 async function initDB() {
-  // Stimmen
+  // votes
   await pool.query(`
     CREATE TABLE IF NOT EXISTS votes (
       id SERIAL PRIMARY KEY,
@@ -41,17 +41,19 @@ async function initDB() {
     );
   `);
 
-  // Kanonischer (erste) Name
+  // items (Migration: item_name_first sicherstellen)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
       guild_id TEXT NOT NULL,
       item_slug TEXT NOT NULL,
-      item_name_first TEXT NOT NULL,
+      item_name_first TEXT,
       PRIMARY KEY (guild_id, item_slug)
     );
   `);
+  await pool.query(`ALTER TABLE items ADD COLUMN IF NOT EXISTS item_name_first TEXT;`);
+  await pool.query(`UPDATE items SET item_name_first = item_slug WHERE item_name_first IS NULL;`);
 
-  // Fenster-Ende-Zeitpunkt
+  // settings
   await pool.query(`
     CREATE TABLE IF NOT EXISTS settings (
       guild_id TEXT PRIMARY KEY,
@@ -67,8 +69,7 @@ function slugify(s) {
 /* ===== Fenster / Auto-Wipe ===== */
 async function getWindowEnd(guildId) {
   const { rows } = await pool.query(
-    `SELECT window_end_at FROM settings WHERE guild_id=$1`,
-    [guildId]
+    `SELECT window_end_at FROM settings WHERE guild_id=$1`, [guildId]
   );
   return rows[0]?.window_end_at ? new Date(rows[0].window_end_at) : null;
 }
@@ -101,16 +102,10 @@ async function scheduleWipeIfNeeded(guildId) {
   clearWipeTimer(guildId);
   const end = await getWindowEnd(guildId);
   if (!end) return;
-
   const msLeft = end.getTime() - Date.now();
-  if (msLeft <= 0) {
-    await wipeGuildVotes(guildId);
-    return;
-  }
+  if (msLeft <= 0) { await wipeGuildVotes(guildId); return; }
   const timer = setTimeout(async () => {
-    try { await wipeGuildVotes(guildId); }
-    catch (e) { console.error("Timer wipe error:", e); }
-    finally { guildTimers.delete(guildId); }
+    try { await wipeGuildVotes(guildId); } finally { guildTimers.delete(guildId); }
   }, msLeft);
   guildTimers.set(guildId, timer);
 }
@@ -129,14 +124,19 @@ async function windowStillActive(guildId) {
   return !!end && end.getTime() > Date.now();
 }
 
-/* ===== Items / Kanonischer Name ===== */
+/* ===== Kanonischer Name (erste Schreibweise) ===== */
 async function ensureCanonicalItem(guildId, inputName) {
   const slug = slugify(inputName);
-  // nur anlegen, falls nicht vorhanden
   await pool.query(
     `INSERT INTO items (guild_id, item_slug, item_name_first)
      VALUES ($1,$2,$3)
      ON CONFLICT (guild_id, item_slug) DO NOTHING`,
+    [guildId, slug, inputName]
+  );
+  await pool.query(
+    `UPDATE items
+        SET item_name_first = COALESCE(item_name_first, $3)
+      WHERE guild_id=$1 AND item_slug=$2 AND item_name_first IS NULL`,
     [guildId, slug, inputName]
   );
   const { rows } = await pool.query(
@@ -163,7 +163,7 @@ async function addVoteIfNew(guildId, itemNameInput, type, userId) {
 
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS total
-     FROM votes WHERE guild_id=$1 AND item_slug=$2 AND type=$3`,
+       FROM votes WHERE guild_id=$1 AND item_slug=$2 AND type=$3`,
     [guildId, slug, t]
   );
   return { isNew, value: rows[0].total, displayName };
@@ -183,14 +183,14 @@ async function showVotes(guildId, itemNameInput) {
     const { slug } = await ensureCanonicalItem(guildId, itemNameInput);
     const { rows } = await pool.query(
       `SELECT i.item_name_first AS item_name,
-              COALESCE(SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END),0)::int  AS gear,
-              COALESCE(SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END),0)::int  AS trait,
-              COALESCE(SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END),0)::int  AS litho
-       FROM items i
-       LEFT JOIN votes v
-         ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
-       WHERE i.guild_id=$1 AND i.item_slug=$2
-       GROUP BY i.item_name_first`,
+              COALESCE(SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END),0)::int AS gear,
+              COALESCE(SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END),0)::int AS trait,
+              COALESCE(SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END),0)::int AS litho
+         FROM items i
+    LEFT JOIN votes v
+           ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
+        WHERE i.guild_id=$1 AND i.item_slug=$2
+     GROUP BY i.item_name_first`,
       [guildId, slug]
     );
     if (rows.length === 0) return `**${itemNameInput}** hat aktuell keine Votes.`;
@@ -199,15 +199,15 @@ async function showVotes(guildId, itemNameInput) {
   } else {
     const { rows } = await pool.query(
       `SELECT i.item_name_first AS item_name,
-              COALESCE(SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END),0)::int  AS gear,
-              COALESCE(SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END),0)::int  AS trait,
-              COALESCE(SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END),0)::int  AS litho
-       FROM items i
-       LEFT JOIN votes v
-         ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
-       WHERE i.guild_id=$1
-       GROUP BY i.item_name_first
-       ORDER BY i.item_name_first`,
+              COALESCE(SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END),0)::int AS gear,
+              COALESCE(SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END),0)::int AS trait,
+              COALESCE(SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END),0)::int AS litho
+         FROM items i
+    LEFT JOIN votes v
+           ON v.guild_id=i.guild_id AND v.item_slug=i.item_slug
+        WHERE i.guild_id=$1
+     GROUP BY i.item_name_first
+     ORDER BY i.item_name_first`,
       [guildId]
     );
     if (rows.length === 0) return "Aktuell gibt’s keine Votes.";
@@ -260,7 +260,9 @@ client.once("ready", async () => {
   try { await registerSlash(); } catch (e) { console.warn("Slash-Register:", e.message); }
 
   // evtl. laufendes Fenster reaktivieren
-  const { rows } = await pool.query(`SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`);
+  const { rows } = await pool.query(
+    `SELECT guild_id, window_end_at FROM settings WHERE window_end_at IS NOT NULL`
+  );
   for (const r of rows) {
     const end = new Date(r.window_end_at);
     if (end.getTime() <= Date.now()) {
@@ -268,9 +270,7 @@ client.once("ready", async () => {
     } else {
       const msLeft = end.getTime() - Date.now();
       const timer = setTimeout(async () => {
-        try { await wipeGuildVotes(r.guild_id); }
-        catch (e) { console.error("Timer wipe error:", e); }
-        finally { guildTimers.delete(r.guild_id); }
+        try { await wipeGuildVotes(r.guild_id); } finally { guildTimers.delete(r.guild_id); }
       }, msLeft);
       guildTimers.set(r.guild_id, timer);
     }
@@ -283,6 +283,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const guildId = interaction.guildId;
 
+      // /vote -> Modal öffnen (startet ggf. das 48h-Fenster)
       if (interaction.commandName === "vote") {
         await ensureWindowActive(guildId);
 
@@ -299,12 +300,14 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
+      // /vote-show -> Übersicht
       if (interaction.commandName === "vote-show") {
         const item = interaction.options.getString("item") || null;
         const out = await showVotes(guildId, item);
         return interaction.reply({ content: out, ephemeral: false });
       }
 
+      // /vote-clear -> Mods löschen alles
       if (interaction.commandName === "vote-clear") {
         const perms = interaction.memberPermissions;
         if (!perms?.has(PermissionFlagsBits.ManageGuild) && !perms?.has(PermissionFlagsBits.Administrator)) {
@@ -315,8 +318,9 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: "🧹 Alle Votes wurden gelöscht. Das nächste `/vote` startet ein neues 48h-Fenster.", ephemeral: false });
       }
 
+      // /vote-remove -> eigene Votes für ein Item löschen
       if (interaction.commandName === "vote-remove") {
-        const item = interaction.options.getString("item");
+        const item = interaction.options.getString("item", true);
         const removed = await removeUserVotes(guildId, item, interaction.user.id);
         return interaction.reply({
           content: removed > 0
@@ -327,6 +331,7 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
+    // Modal: Item eingegeben -> Auswahlmenü (GENAU EIN Grund)
     if (interaction.isModalSubmit() && interaction.customId === "voteItemModal") {
       const item = interaction.fields.getTextInputValue("itemName");
       const guildId = interaction.guildId;
@@ -351,6 +356,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
+    // Auswahl geklickt -> Vote speichern
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voteType:")) {
       const itemInput = interaction.customId.slice("voteType:".length);
       const guildId = interaction.guildId;
@@ -363,16 +369,14 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       const chosen = interaction.values?.[0];
-      if (!chosen) {
-        return interaction.update({ content: "Kein Grund gewählt.", components: [] });
-      }
+      if (!chosen) return interaction.update({ content: "Kein Grund gewählt.", components: [] });
 
-      const result = await addVoteIfNew(guildId, itemInput, chosen, userId);
-      const line = result.isNew
-        ? `✔️ **${chosen.toUpperCase()}** gezählt → **${result.value}**`
-        : `⚠️ **${chosen.toUpperCase()}** bereits von dir gevotet. Aktuell: **${result.value}**`;
+      const { isNew, value, displayName } = await addVoteIfNew(guildId, itemInput, chosen, userId);
+      const line = isNew
+        ? `✔️ **${chosen.toUpperCase()}** gezählt → **${value}**`
+        : `⚠️ **${chosen.toUpperCase()}** bereits von dir gevotet. Aktuell: **${value}**`;
 
-      const summary = await showVotes(guildId, result.displayName);
+      const summary = await showVotes(guildId, displayName);
       return interaction.update({ content: `${line}\n\n${summary}`, components: [] });
     }
   } catch (e) {
@@ -381,15 +385,7 @@ client.on("interactionCreate", async (interaction) => {
       try {
         const msg = typeof e?.message === "string" ? e.message : "Unbekannter Fehler";
         return interaction.reply({ content: `Fehler: ${msg}`, ephemeral: true });
-      } catch {
-        // falls schon geantwortet wurde
-        try {
-          const msg = typeof e?.message === "string" ? e.message : "Unbekannter Fehler";
-          if (interaction.isMessageComponent()) {
-            return interaction.update({ content: `Fehler: ${msg}`, components: [] });
-          }
-        } catch {}
-      }
+      } catch {}
     }
   }
 });
