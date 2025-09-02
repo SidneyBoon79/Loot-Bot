@@ -1,24 +1,16 @@
-// commands/vote.mjs — Modal + Dropdown (angepasst an dein Schema)
-// Schema laut psql:
-// votes: id, guild_id, item_slug, type, user_id, created_at, item_name_first, reason (ggf. vorhanden)
-// items: id, guild_id, item_slug, item_name_first, rolled_at, rolled_by, rolled_manual
-
+// commands/vote.mjs — Modal + Dropdown (angepasst an dein Schema, mit reason=type Insert)
 const VALID_REASONS = new Map([
   ["gear",  "⚔️ Gear"],
   ["trait", "💠 Trait"],
   ["litho", "📜 Litho"],
 ]);
 
-// --- Helpers -------------------------------------------------
-function normalizeItem(raw) {
-  return (raw ?? "").trim().slice(0, 120);
-}
+function normalizeItem(raw) { return (raw ?? "").trim().slice(0, 120); }
 
-// sehr konservatives Slugging, damit "Schwert" -> "schwert"
 function slugify(name) {
   return name
     .toLowerCase()
-    .normalize("NFKD")          // z.B. ü -> u + ¨
+    .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
@@ -30,23 +22,14 @@ function prettyName(name) {
 
 function asStringSelect(placeholder, customId, optionsArr) {
   return {
-    type: 1, // Action Row
+    type: 1,
     components: [
       { type: 3, custom_id: customId, placeholder, min_values: 1, max_values: 1, options: optionsArr }
     ]
   };
 }
+function b64uEncode(s) { return Buffer.from(s, "utf8").toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
 
-function b64uEncode(s) {
-  return Buffer.from(s, "utf8").toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
-}
-function b64uDecode(s) {
-  s = s.replace(/-/g,"+").replace(/_/g,"/");
-  const pad = s.length % 4 ? 4 - (s.length % 4) : 0;
-  return Buffer.from(s + "=".repeat(pad), "base64").toString("utf8");
-}
-
-// --- Public API ----------------------------------------------
 export function makeVoteModal() {
   return {
     custom_id: "vote:modal",
@@ -56,9 +39,9 @@ export function makeVoteModal() {
         type: 1,
         components: [
           {
-            type: 4,               // Text Input
+            type: 4,
             custom_id: "vote:item",
-            style: 1,              // Short
+            style: 1,
             label: "Item (z. B. Schwert, Ring, Bogen …)",
             placeholder: "Schwert der Abenddämmerung",
             required: true,
@@ -96,7 +79,7 @@ export async function handleModalSubmit(ctx) {
   );
 }
 
-// Wird vom Server bei Dropdown-Auswahl aufgerufen (mit Defer + FollowUp)
+// Wird vom Server bei Dropdown-Auswahl (deferred) aufgerufen
 export async function handleReasonSelect(ctx) {
   const itemName = normalizeItem(ctx.item);
   const reason   = (ctx.reason ?? "").trim(); // gear|trait|litho
@@ -125,14 +108,14 @@ export async function handleReasonSelect(ctx) {
     );
   }
 
-  // Vote eintragen (DEIN SCHEMA)
+  // ✅ Insert: type = Grund, und reason = type (wegen NOT NULL in deiner DB)
   await ctx.db.query(
-    `INSERT INTO votes (guild_id, user_id, item_slug, type, item_name_first, created_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())`,
+    `INSERT INTO votes (guild_id, user_id, item_slug, type, reason, item_name_first, created_at)
+     VALUES ($1, $2, $3, $4, $4, $5, NOW())`,
     [ctx.guildId, ctx.userId, slug, reason, nameFirst]
   );
 
-  // Item registrieren, falls unbekannt (using slug)
+  // Item registrieren, falls unbekannt
   await ctx.db.query(
     `INSERT INTO items (guild_id, item_slug, item_name_first, rolled_at)
      SELECT $1, $2, $3, NULL
