@@ -1,8 +1,7 @@
 // server.mjs — Discord Interactions (HTTP only, serverless-safe)
-// - /vote öffnet Modal (Item)
-// - MODAL_SUBMIT → ephemere Nachricht mit Dropdown (Gear/Trait/Litho)
-// - MESSAGE_COMPONENT (vote:grund:*) → DEFER sofort, danach FollowUp senden
-// - /roll Dropdown bleibt; /winner, /reducew etc. unverändert
+// - /vote Modal (Item) → Dropdown (Grund)
+// - Component (vote:grund:*) → DEFER + FollowUp (Timeout-Safe)
+// - Auto-Migration: fügt votes.reason hinzu, falls fehlend
 
 import express from "express";
 import di from "discord-interactions";
@@ -112,6 +111,41 @@ function asStringSelect(placeholder, customId, optionsArr) {
   };
 }
 
+// ===== Auto-Migration (idempotent) =====
+let migratedOnce = false;
+async function ensureMigrations(db) {
+  if (migratedOnce) return;
+  // votes.reason hinzufügen, falls sie fehlt
+  await db.query(`CREATE TABLE IF NOT EXISTS votes (
+    guild_id   TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    item_name  TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT 'gear',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (guild_id, user_id, item_name)
+  );`);
+  await db.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS reason TEXT;`);
+  await db.query(`UPDATE votes SET reason='gear' WHERE reason IS NULL;`);
+  await db.query(`ALTER TABLE votes ALTER COLUMN reason SET NOT NULL;`);
+  await db.query(`CREATE INDEX IF NOT EXISTS votes_guild_created_idx ON votes (guild_id, created_at);`);
+  // items/wins sicherstellen (wie gehabt)
+  await db.query(`CREATE TABLE IF NOT EXISTS items (
+    guild_id   TEXT NOT NULL,
+    item_name  TEXT NOT NULL,
+    rolled     BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (guild_id, item_name)
+  );`);
+  await db.query(`CREATE TABLE IF NOT EXISTS wins (
+    guild_id   TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    win_count  INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (guild_id, user_id)
+  );`);
+  migratedOnce = true;
+}
+
 // ===== Express =====
 const app = express();
 app.get("/", (_req, res) => res.status(200).send("ok"));
@@ -121,9 +155,12 @@ app.post(
   verifyKeyMiddleware(PUBLIC_KEY),
   async (req, res) => {
     try {
+      // **WICHTIG**: Migration möglichst früh
+      await ensureMigrations(pool);
+
       const i = req.body;
 
-      // 1) Discord PING → PONG
+      // 1) PING → PONG
       if (i.type === InteractionType.PING) {
         return res.send({ type: InteractionResponseType.PONG });
       }
@@ -135,7 +172,6 @@ app.post(
 
         switch (name) {
           case "vote": {
-            // Variante B: Modal öffnen (Item-Eingabe)
             const modal = cmdVote.makeVoteModal();
             return res.send({ type: InteractionResponseType.MODAL, data: modal });
           }
@@ -187,12 +223,11 @@ app.post(
         }
       }
 
-      // 3) Component Interactions (Dropdowns/Buttons)
+      // 3) Component Interactions
       if (i.type === InteractionType.MESSAGE_COMPONENT) {
         const customId = i.data?.custom_id || "";
         const ctx = makeCtx({ interaction: i, res });
 
-        // /roll Dropdown
         if (customId === "roll:select") {
           ctx.requireMod?.();
           const selected = i.data?.values?.[0];
@@ -201,19 +236,17 @@ app.post(
           return cmdRoll.run(forgedCtx);
         }
 
-        // /vote Grund-Dropdown (custom_id: vote:grund:<b64u(item)>)
         if (customId.startsWith("vote:grund:")) {
           const encoded = customId.slice("vote:grund:".length);
           const item = b64uDecode(encoded).trim();
           const reason = i.data?.values?.[0];
 
-          // Sofort-ACK (deferred, ephemer) → verhindert 3s-Timeout
+          // Sofort-ACK (deferred, ephemer)
           res.send({
             type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
             data: { flags: EPHEMERAL }
           });
 
-          // Danach FollowUp mit Ergebnis senden
           try {
             await cmdVote.handleReasonSelect({ ...ctx, item, reason, useFollowUp: true });
           } catch (e) {
@@ -229,7 +262,6 @@ app.post(
       if (i.type === InteractionType.MODAL_SUBMIT) {
         const ctx = makeCtx({ interaction: i, res });
         if (i.data?.custom_id === "vote:modal") {
-          // Modal liefert Item → schicke Dropdown zurück (ephemer)
           return cmdVote.handleModalSubmit(ctx);
         }
         return ctx.reply("Unbekanntes Modal.", { ephemeral: true });
