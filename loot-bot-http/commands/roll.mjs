@@ -81,17 +81,16 @@ export async function run(ctx) {
   );
   const newWins = w.rows[0]?.win_count ?? 1;
 
-  // Ausgabe (öffentlich), kompakt mit Emojis + (Wx) + Wurf 1..100
+  // Ausgabe (öffentlich), Top 3 mit 🥇/🥈/🥉, danach nur "—"
   const lines = ranked.slice(0, 15).map((r, idx) => {
-    const pos = idx+1;
-    const marker = pos === 1 ? "🏆" : "—";
+    const marker = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : "—";
     const reason = RLABEL[r.reason] || r.reason;
     return `${marker} <@${r.user_id}> · ${reason} · (W${fmt(r.wins)}) · Wurf ${fmt(r.roll)}`;
   });
 
   const winReason = RLABEL[winner.reason] || winner.reason;
   const header = `**Roll-Ergebnis für ${itemName}:**`;
-  const footer = `Gewinner: <@${winner.user_id}> — ${winReason} · neuer Stand: (W${fmt(newWins)})`;
+  const footer = `🏆 Gewinner: <@${winner.user_id}> — ${winReason} · Wurf ${fmt(winner.roll)} · neuer Stand: (W${fmt(newWins)})`;
 
   const body = `${header}\n${lines.join("\n")}\n\n${footer}`;
 
