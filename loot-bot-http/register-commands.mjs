@@ -1,6 +1,6 @@
 // register-commands.mjs
-// Löscht alte Commands und registriert neue nur für die GUILD.
-// Nutzt Railway ENV: BOT_TOKEN, CLIENT_ID, GUILD_ID
+// Bulk-Overwrite der Guild-Commands (löscht alte & setzt neue in 1-2 Calls)
+// ENV auf Railway: BOT_TOKEN, CLIENT_ID, GUILD_ID
 
 const TOKEN     = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -13,31 +13,13 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 
 const API = "https://discord.com/api/v10";
 
-async function call(path, method = "GET", body) {
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers: {
-      "Authorization": `Bot ${TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${method} ${path} -> ${res.status}: ${text}`);
-  }
-  if (res.status === 204) return null;
-  return res.json();
-}
-
-// ---- Deine Commands (GUILD) ----
 const commands = [
   {
     name: "vote",
     description: "Vote abgeben: Item (Autocomplete) oder Modal → Grund wählen",
     options: [
       {
-        type: 3, // STRING
+        type: 3,
         name: "item",
         description: "Item-Name (Autocomplete). Leer lassen für Modal.",
         required: false,
@@ -67,41 +49,57 @@ const commands = [
   { name: "reroll",   description: "Re-Roll für bereits gerolltes Item (Mods)." }
 ];
 
-async function wipeGlobal() {
-  const existing = await call(`/applications/${CLIENT_ID}/commands`, "GET");
-  if (Array.isArray(existing) && existing.length) {
-    console.log(`🧹 Deleting ${existing.length} GLOBAL commands...`);
-    for (const cmd of existing) {
-      await call(`/applications/${CLIENT_ID}/commands/${cmd.id}`, "DELETE");
-    }
-  }
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function wipeGuild() {
-  const existing = await call(`/applications/${CLIENT_ID}/guilds/${GUILD_ID}/commands`, "GET");
-  if (Array.isArray(existing) && existing.length) {
-    console.log(`🧹 Deleting ${existing.length} GUILD commands in ${GUILD_ID}...`);
-    for (const cmd of existing) {
-      await call(`/applications/${CLIENT_ID}/guilds/${GUILD_ID}/commands/${cmd.id}`, "DELETE");
-    }
-  }
-}
+async function call(path, method, body) {
+  while (true) {
+    const res = await fetch(`${API}${path}`, {
+      method,
+      headers: {
+        "Authorization": `Bot ${TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
 
-async function registerGuild() {
-  console.log(`📝 Registering ${commands.length} GUILD commands in ${GUILD_ID}...`);
-  const result = await call(
-    `/applications/${CLIENT_ID}/guilds/${GUILD_ID}/commands`,
-    "PUT",
-    commands
-  );
-  console.log(`✅ ${Array.isArray(result) ? result.length : 0} commands registered for guild ${GUILD_ID}.`);
+    if (res.status === 429) {
+      // Rate limited: respektiere retry_after
+      let retry = 2;
+      try {
+        const data = await res.json();
+        retry = (data.retry_after ?? 2) + 0.25;
+      } catch {}
+      console.warn(`⏳ Rate limited, retry in ${retry}s`);
+      await sleep(retry * 1000);
+      continue;
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`${method} ${path} -> ${res.status}: ${text}`);
+    }
+
+    if (res.status === 204) return null;
+    return res.json();
+  }
 }
 
 (async () => {
   try {
-    await wipeGlobal();
-    await wipeGuild();
-    await registerGuild();
+    const base = `/applications/${CLIENT_ID}/guilds/${GUILD_ID}/commands`;
+
+    // 1) Wipe all (PUT empty array)
+    console.log(`🧹 Clearing all guild commands in ${GUILD_ID}...`);
+    await call(base, "PUT", []); // ersetzt alles durch nichts
+
+    // kurze Verschnaufpause
+    await sleep(500);
+
+    // 2) Set new commands (Bulk overwrite)
+    console.log(`📝 Registering ${commands.length} guild commands...`);
+    const result = await call(base, "PUT", commands);
+    console.log(`✅ ${Array.isArray(result) ? result.length : 0} commands active in guild ${GUILD_ID}.`);
+
     console.log("🏁 Done.");
     process.exit(0);
   } catch (err) {
