@@ -1,22 +1,20 @@
 {
   "name": "loot-bot-http",
-  "private": true,
+  "version": "1.0.0",
   "type": "module",
+  "main": "server/index.mjs",
   "scripts": {
-    "start": "node server.mjs",
-    "register": "node register-commands.mjs"
+    "start": "node server/index.mjs",
+    "dev": "nodemon server/index.mjs",
+    "register": "node register-commands.mjs",
     "migrate": "node db/migrate.mjs"
   },
   "dependencies": {
-    "discord-interactions": "^3.3.0",
-    "discord.js": "^14.15.2",
-    "express": "^4.19.2",
-    "pg": "^8.11.5"
-  }
-  "dependencies": {
     "body-parser": "^1.20.2",
     "express": "^4.18.2",
-    "pg": "^8.11.3",
-    "node-fetch": "^3.3.2"
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
 }
