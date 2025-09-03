@@ -1,3 +1,82 @@
+// register-commands.mjs
+// Registriert/aktualisiert Slash-Commands bei Discord (Guild-Scoped)
+
+import "node:fs/promises";
+import fetch from "node-fetch"; // Node 18+ hat global fetch; Railway meist auch. Falls Fehler: npm i node-fetch@3
+
+const TOKEN     = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+const GUILD_ID  = process.env.GUILD_ID;
+
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error("❌ Environment Variablen fehlen: DISCORD_TOKEN, DISCORD_CLIENT_ID, GUILD_ID");
+  process.exit(1);
+}
+
+// ---- Commands-Definitionen (müssen zu deinen Files passen) ----
+const commands = [
+  {
+    name: "vote",
+    description: "Vote abgeben: Item (Autocomplete) oder per Modal eingeben → Grund wählen",
+    options: [
+      {
+        type: 3,
+        name: "item",
+        description: "Item-Name (Autocomplete). Leer lassen für manuelle Eingabe im Modal.",
+        required: false,
+        autocomplete: true
+      }
+    ]
+  },
+  { name: "vote-info",   description: "Zeigt das Kurz-Tutorial" },
+  { name: "vote-show",   description: "Zeigt alle Votes der letzten 48h" },
+  {
+    name: "vote-remove",
+    description: "Entferne deinen Vote für ein Item",
+    options: [{ type: 3, name: "item", description: "Name des Items", required: true }]
+  },
+  { name: "vote-clear",  description: "Löscht alle Votes, Items und Wins (Reset)" },
+  {
+    name: "reducew",
+    description: "Reduziert die Win-Zahl eines Users",
+    options: [
+      { type: 6, name: "user", description: "Wähle den User aus", required: true },
+      { type: 4, name: "anzahl", description: "Um wie viele Wins reduzieren?", required: true, min_value: 1 }
+    ]
+  },
+  { name: "winner",   description: "Zeigt eine kompakte Übersicht der Gewinner (letzte 48h)" },
+  { name: "roll",     description: "Rollt ein einzelnes Item aus (nur für Mods/Admins)" },
+  { name: "roll-all", description: "Rollt alle offenen Items (nur für Mods/Admins)" },
+  { name: "reroll",   description: "Re-Roll eines bereits gerollten Items (nur für Mods/Admins)" }
+];
+
+// ---- Discord REST Call ----
+const url = `https://discord.com/api/v10/applications/${CLIENT_ID}/guilds/${GUILD_ID}/commands`;
+
+async function main() {
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bot ${TOKEN}`
+    },
+    body: JSON.stringify(commands)
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("❌ Fehler beim Registrieren:", res.status, text);
+    process.exit(1);
+  }
+
+  const data = await res.json();
+  console.log(`✅ ${data.length} Commands registriert/aktualisiert für Guild ${GUILD_ID}.`);
+}
+
+main().catch(err => {
+  console.error("❌ Unexpected:", err);
+  process.exit(1);
+});
 // register-commands.mjs — registriert Guild-Commands inkl. neuem /reroll
 import { REST, Routes } from "discord.js";
 
