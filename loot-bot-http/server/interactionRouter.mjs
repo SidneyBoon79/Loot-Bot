@@ -4,17 +4,17 @@
 // Commands
 import * as vote from "../commands/vote.mjs";
 
-// Component-, Autocomplete- und Modal-Router
+// Router für Components, Autocomplete und Modals
 import { onComponent } from "../interactions/components/index.mjs";
 import { onAutocomplete } from "../interactions/autocomplete/index.mjs";
 import { onModalSubmit } from "../interactions/modals/index.mjs";
 
-// Optional: Command-Registry, falls du später weitere Commands addest
+// Command-Registry – später kannst du hier weitere Commands hinzufügen
 const COMMANDS = {
-  [vote.command?.name || "vote"]: vote
+  [vote.command?.name || "vote"]: vote,
 };
 
-// Hilfsfunktionen, um Adapter-Unterschiede abzufangen
+// Hilfsfunktionen für Adapter-Kompatibilität
 function getType(ctx) {
   if (typeof ctx.type === "function") return ctx.type();
   return ctx.interaction?.type ?? null;
@@ -25,8 +25,8 @@ function getCommandName(ctx) {
 }
 
 /**
- * Haupteinstieg: Route eine Interaction basierend auf ihrem Typ.
- * @param {object} ctx - dein Context/Adapter-Objekt
+ * Zentraler Einstiegspunkt: routet eine Interaction basierend auf ihrem Typ.
+ * @param {object} ctx - Context/Adapter-Objekt
  */
 export async function routeInteraction(ctx) {
   try {
@@ -38,7 +38,6 @@ export async function routeInteraction(ctx) {
         const name = getCommandName(ctx);
         const cmd = COMMANDS[name];
         if (!cmd?.run) {
-          // Unbekannter Command
           if (typeof ctx.reply === "function") {
             await ctx.reply("Befehl nicht gefunden.", { ephemeral: true });
           }
@@ -62,11 +61,10 @@ export async function routeInteraction(ctx) {
         return onModalSubmit(ctx);
       }
 
-      // andere / unbekannte Typen
+      // andere/unbekannte Typen → noop
       default: {
-        // höflich no-op
         if (typeof ctx.respond === "function") {
-          return ctx.respond([]); // z. B. bei verirrten Autocomplete-Events
+          return ctx.respond([]); // z. B. für verirrte Autocomplete-Events
         }
         return;
       }
@@ -74,9 +72,11 @@ export async function routeInteraction(ctx) {
   } catch (err) {
     console.error("[interactionRouter] fatal:", err);
 
-    // Versuche, höflich eine Antwort zu geben / UI aufzuräumen
     if (typeof ctx.update === "function") {
-      return ctx.update({ content: "Upps. Da ist was schiefgelaufen.", components: [] });
+      return ctx.update({
+        content: "Upps. Da ist was schiefgelaufen.",
+        components: [],
+      });
     }
     if (typeof ctx.reply === "function") {
       return ctx.reply("Upps. Da ist was schiefgelaufen.", { ephemeral: true });
