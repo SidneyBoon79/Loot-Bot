@@ -5,27 +5,33 @@ import { handleModalSubmit as handleVoteModalSubmit } from "../../commands/vote.
 
 export async function onModalSubmit(ctx) {
   try {
-    // custom_id des Modals holen (verschiedene Adapter möglich)
     const id =
       (typeof ctx.customId === "function" && ctx.customId()) ||
-      (ctx.interaction?.data?.custom_id ?? "") ||
+      ctx.interaction?.data?.custom_id ||
       "";
 
     if (!id) return;
 
-    // ---- Vote: Modal -------------------------------------------
+    // ---- Vote: Modal -------------------------------
     if (id === "vote:modal") {
       return handleVoteModalSubmit(ctx);
     }
-    // ------------------------------------------------------------
+    // ------------------------------------------------
 
-    // Fallback: keine bekannte Modal-ID
+    // Unbekanntes Modal → einfach ignorieren
     return;
   } catch (err) {
     console.error("[modals/index] error:", err);
-    // UI höflich bereinigen, wenn möglich
+
+    // Höfliche Fehlermeldung zurückgeben
     if (typeof ctx.reply === "function") {
       return ctx.reply("Upps. Da ist was schiefgelaufen.", { ephemeral: true });
+    }
+    if (typeof ctx.update === "function") {
+      return ctx.update({
+        content: "Upps. Da ist was schiefgelaufen.",
+        components: [],
+      });
     }
   }
 }
