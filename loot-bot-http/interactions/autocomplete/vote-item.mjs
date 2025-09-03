@@ -5,28 +5,28 @@ import { searchItems } from "../../services/itemsCatalog.mjs";
 
 export async function handleVoteItemAutocomplete(ctx) {
   try {
-    // Optional: nur reagieren, wenn es wirklich der /vote-Command ist
-    if (typeof ctx.commandName === "function" && ctx.commandName() !== "vote") {
-      return;
-    }
-
-    // Fokussierter Eingabewert (vom User getippt)
+    // Aktuell vom User getippter Wert
     const focused =
       (typeof ctx.getFocusedOptionValue === "function"
         ? ctx.getFocusedOptionValue()
-        : typeof ctx.focusedValue === "function"
-        ? ctx.focusedValue()
-        : "") || "";
+        : ctx.interaction?.data?.options?.find?.(o => o.focused)?.value
+      ) || "";
 
-    // Suche im in-memory Katalog (max. 25 Ergebnisse)
+    // Suche im Katalog
     const results = await searchItems(focused);
-    const choices = results.slice(0, 25).map((name) => ({ name, value: name }));
 
-    // Antwort an Discord senden
+    // In Discord-Format umwandeln
+    const choices = results.slice(0, 25).map(name => ({
+      name,
+      value: name
+    }));
+
+    // Antwort senden
     return ctx.respond(choices);
   } catch (err) {
-    console.error("[autocomplete] vote-item error:", err);
-    // UX: still & freundlich bleiben – bei Fehler einfach keine Vorschläge senden
-    return ctx.respond([]);
+    console.error("[autocomplete/vote-item] error:", err);
+    if (typeof ctx.respond === "function") {
+      return ctx.respond([]); // Leere Antwort, falls Fehler
+    }
   }
 }
