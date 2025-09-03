@@ -1,13 +1,37 @@
 // interactions/components/index.mjs
+// Router für Component-Interactions (Selects/Buttons)
+
 import { handleVoteReason } from "./vote-reason.mjs";
 
 export async function onComponent(ctx) {
-  const id = typeof ctx.customId === "function" ? ctx.customId() : "";
-  if (!id) return;
+  try {
+    // custom_id der Interaktion
+    const id =
+      (typeof ctx.customId === "function" && ctx.customId()) ||
+      (ctx.interaction?.data?.custom_id ?? "") ||
+      "";
 
-  if (id.startsWith("vote:reason:")) {
-    return handleVoteReason(ctx);
+    if (!id) {
+      // Nichts zu routen
+      return;
+    }
+
+    // ---- Vote: Grund-Auswahl -----------------------------------
+    if (id.startsWith("vote:grund:")) {
+      return handleVoteReason(ctx);
+    }
+    // ------------------------------------------------------------
+
+    // Fallback: keine bekannte Komponente
+    return;
+  } catch (err) {
+    console.error("[components/index] error:", err);
+    // Wenn möglich, höflich die UI bereinigen
+    if (typeof ctx.update === "function") {
+      return ctx.update({
+        content: "Upps. Da ist was schiefgelaufen.",
+        components: []
+      });
+    }
   }
-
-  // weitere Komponenten später hier routen …
 }
