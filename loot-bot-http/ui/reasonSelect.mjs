@@ -12,11 +12,23 @@ export function reasonSelect(customId = "vote:grund") {
         min_values: 1,
         max_values: 1,
         options: [
-          { label: "Gear (⚔️)",  value: "gear",  description: "Direktes Upgrade" },
-          { label: "Trait (💠)", value: "trait", description: "Build-Trait" },
-          { label: "Litho (📜)", value: "litho", description: "Rezept/Schrift" }
-        ]
-      }
-    ]
+          {
+            label: "Gear (⚔️)",
+            value: "gear",
+            description: "Nur zum selbst ausrüsten",
+          },
+          {
+            label: "Trait (💠)",
+            value: "trait",
+            description: "Freischalten oder Upgraden",
+          },
+          {
+            label: "Litho (📜)",
+            value: "litho",
+            description: "Sammlung",
+          },
+        ],
+      },
+    ],
   };
 }
