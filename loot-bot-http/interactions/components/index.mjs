@@ -2,6 +2,12 @@
 // Router für Component-Interactions (Dropdowns/Buttons)
 
 import { handleVoteReason } from "./vote-reason.mjs";
+import { handleRollSelect } from "./roll-select.mjs";
+import {
+  handleRerollSelect,
+  handleRerollConfirm,
+  handleRerollCancel
+} from "./reroll-select.mjs";
 
 export async function onComponent(ctx) {
   try {
@@ -16,6 +22,22 @@ export async function onComponent(ctx) {
     if (id.startsWith("vote:grund:")) {
       return handleVoteReason(ctx);
     }
+
+    // ---- Roll: Item-Auswahl -------------------------
+    if (id === "roll:select") {
+      return handleRollSelect(ctx);
+    }
+
+    // ---- Re-Roll Flow -------------------------------
+    if (id === "reroll:select") {
+      return handleRerollSelect(ctx);
+    }
+    if (id.startsWith("reroll:confirm:")) {
+      return handleRerollConfirm(ctx);
+    }
+    if (id.startsWith("reroll:cancel:")) {
+      return handleRerollCancel(ctx);
+    }
     // -------------------------------------------------
 
     // Fallback: keine bekannte Komponente
@@ -26,7 +48,7 @@ export async function onComponent(ctx) {
     if (typeof ctx.update === "function") {
       return ctx.update({
         content: "Upps. Da ist was schiefgelaufen.",
-        components: [],
+        components: []
       });
     }
   }
