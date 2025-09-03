@@ -1,22 +1,25 @@
 // interactions/autocomplete/index.mjs
-// Router für Autocomplete-Events. Leitet /vote -> item zum passenden Handler.
+// Router für Autocomplete-Events
 
 import { handleVoteItemAutocomplete } from "./vote-item.mjs";
 
 export async function onAutocomplete(ctx) {
   try {
     const name =
-      typeof ctx.commandName === "function" ? ctx.commandName() : "";
+      (typeof ctx.commandName === "function" && ctx.commandName()) ||
+      ctx.interaction?.data?.name ||
+      "";
+
     const focused =
-      typeof ctx.focusedOptionName === "function"
-        ? ctx.focusedOptionName()
-        : "";
+      (typeof ctx.focusedOptionName === "function" && ctx.focusedOptionName()) ||
+      ctx.interaction?.data?.options?.find?.(o => o.focused)?.name ||
+      "";
 
     if (name === "vote" && focused === "item") {
       return handleVoteItemAutocomplete(ctx);
     }
 
-    // Kein Match? Leere Antwort zurückgeben.
+    // Kein Match → leere Antwort
     if (typeof ctx.respond === "function") {
       return ctx.respond([]);
     }
