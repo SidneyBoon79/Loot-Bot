@@ -1,4 +1,5 @@
 // commands/vote.mjs — Modal + Dropdown (angepasst an dein Schema, mit reason=type Insert)
+
 const VALID_REASONS = new Map([
   ["gear",  "⚔️ Gear"],
   ["trait", "💠 Trait"],
@@ -30,6 +31,66 @@ function asStringSelect(placeholder, customId, optionsArr) {
 }
 function b64uEncode(s) { return Buffer.from(s, "utf8").toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
 
+// -----------------------------------------------------
+// NEU: Command-Definition (Item-Option mit Autocomplete)
+// -----------------------------------------------------
+export const command = {
+  name: "vote",
+  description: "Vote abgeben: Item (Autocomplete) oder per Modal eingeben → Grund wählen",
+  options: [
+    {
+      type: 3, // STRING
+      name: "item",
+      description: "Item-Name (Autocomplete). Leer lassen für manuelle Eingabe im Modal.",
+      required: false,        // bewusst false, damit dein alter Modal-Flow erhalten bleibt
+      autocomplete: true
+    }
+  ]
+};
+
+// ------------------------------------
+// NEU: run(ctx) – Autocomplete-Hook-in
+// ------------------------------------
+export async function run(ctx) {
+  // Falls der User bereits über das Autocomplete-Feld ein Item gesetzt hat:
+  const hasItemOpt = typeof ctx?.opts?.getString === "function";
+  const itemFromOpt = hasItemOpt ? ctx.opts.getString("item") : null;
+
+  if (itemFromOpt && itemFromOpt.trim()) {
+    const itemName = normalizeItem(itemFromOpt);
+    const encoded  = b64uEncode(itemName);
+
+    const optionsArr = [
+      { label: "Gear (⚔️)",  value: "gear",  description: "Direktes Upgrade" },
+      { label: "Trait (💠)", value: "trait", description: "Build-Trait" },
+      { label: "Litho (📜)", value: "litho", description: "Rezept/Schrift" },
+    ];
+
+    // Direkt den Grund-Dropdown zeigen (ephemer), ohne Modal
+    return ctx.reply({
+      content: `Item: **${itemName}**\nWähle jetzt den **Grund**:`,
+      components: [asStringSelect("Grund auswählen …", "vote:grund:" + encoded, optionsArr)],
+      ephemeral: true
+    });
+  }
+
+  // Kein Item über Autocomplete: alter Weg → Modal öffnen
+  const modal = makeVoteModal();
+
+  // Defensive: verschiedene Adapter-APIs unterstützen
+  if (typeof ctx.showModal === "function") {
+    return ctx.showModal(modal);
+  }
+  if (typeof ctx.replyModal === "function") {
+    return ctx.replyModal(modal);
+  }
+  // Fallback: einige Adapter akzeptieren reply({ modal: ... })
+  return ctx.reply(modal, { modal: true });
+}
+
+// -----------------
+// Modal-Erstellung
+// -----------------
 export function makeVoteModal() {
   return {
     custom_id: "vote:modal",
@@ -53,6 +114,9 @@ export function makeVoteModal() {
   };
 }
 
+// -----------------------------
+// Modal-Submit -> Grund-Dropdown
+// -----------------------------
 export async function handleModalSubmit(ctx) {
   const comps = ctx.interaction?.data?.components ?? [];
   const firstRow = comps[0]?.components?.[0];
@@ -79,7 +143,9 @@ export async function handleModalSubmit(ctx) {
   );
 }
 
-// Wird vom Server bei Dropdown-Auswahl (deferred) aufgerufen
+// -----------------------------------------------------
+// Dropdown-Auswahl -> Persistenz + Bestätigungs-Nachricht
+// -----------------------------------------------------
 export async function handleReasonSelect(ctx) {
   const itemName = normalizeItem(ctx.item);
   const reason   = (ctx.reason ?? "").trim(); // gear|trait|litho
