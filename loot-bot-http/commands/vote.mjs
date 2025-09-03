@@ -1,96 +1,98 @@
-// commands/vote.mjs — Modal + Dropdown (angepasst an dein Schema, mit reason=type Insert)
+// commands/vote.mjs — Vote Command mit Autocomplete + Modal + Grund-Dropdown
+import { saveVote, isValidReason, prettyReason } from "../db/votes.mjs";
 
-const VALID_REASONS = new Map([
-  ["gear",  "⚔️ Gear"],
-  ["trait", "💠 Trait"],
-  ["litho", "📜 Litho"],
-]);
-
-function normalizeItem(raw) { return (raw ?? "").trim().slice(0, 120); }
-
-function slugify(name) {
-  return name
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+// ------------------
+// Hilfsfunktionen
+// ------------------
+function normalizeItem(raw) {
+  return (raw ?? "").trim().slice(0, 120);
 }
-function prettyName(name) {
-  if (!name) return name;
-  return name.charAt(0).toUpperCase() + name.slice(1);
+function b64uEncode(s) {
+  return Buffer.from(s, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
-function asStringSelect(placeholder, customId, optionsArr) {
-  return {
-    type: 1,
-    components: [
-      { type: 3, custom_id: customId, placeholder, min_values: 1, max_values: 1, options: optionsArr }
-    ]
-  };
-}
-function b64uEncode(s) { return Buffer.from(s, "utf8").toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
-
-// -----------------------------------------------------
-// NEU: Command-Definition (Item-Option mit Autocomplete)
-// -----------------------------------------------------
+// ------------------
+// Command-Definition
+// ------------------
 export const command = {
   name: "vote",
-  description: "Vote abgeben: Item (Autocomplete) oder per Modal eingeben → Grund wählen",
+  description:
+    "Vote abgeben: Item (Autocomplete) oder per Modal eingeben → Grund wählen",
   options: [
     {
       type: 3, // STRING
       name: "item",
-      description: "Item-Name (Autocomplete). Leer lassen für manuelle Eingabe im Modal.",
-      required: false,        // bewusst false, damit dein alter Modal-Flow erhalten bleibt
-      autocomplete: true
-    }
-  ]
+      description:
+        "Item-Name (Autocomplete). Leer lassen für manuelle Eingabe im Modal.",
+      required: false,
+      autocomplete: true,
+    },
+  ],
 };
 
-// ------------------------------------
-// NEU: run(ctx) – Autocomplete-Hook-in
-// ------------------------------------
+// ------------------
+// Command-Handler
+// ------------------
 export async function run(ctx) {
-  // Falls der User bereits über das Autocomplete-Feld ein Item gesetzt hat:
   const hasItemOpt = typeof ctx?.opts?.getString === "function";
   const itemFromOpt = hasItemOpt ? ctx.opts.getString("item") : null;
 
+  // Falls Item per Autocomplete ausgewählt → direkt Dropdown
   if (itemFromOpt && itemFromOpt.trim()) {
     const itemName = normalizeItem(itemFromOpt);
-    const encoded  = b64uEncode(itemName);
+    const encoded = b64uEncode(itemName);
 
-    const optionsArr = [
-      { label: "Gear (⚔️)",  value: "gear",  description: "Direktes Upgrade" },
-      { label: "Trait (💠)", value: "trait", description: "Build-Trait" },
-      { label: "Litho (📜)", value: "litho", description: "Rezept/Schrift" },
-    ];
-
-    // Direkt den Grund-Dropdown zeigen (ephemer), ohne Modal
     return ctx.reply({
       content: `Item: **${itemName}**\nWähle jetzt den **Grund**:`,
-      components: [asStringSelect("Grund auswählen …", "vote:grund:" + encoded, optionsArr)],
-      ephemeral: true
+      components: [
+        {
+          type: 1,
+          components: [
+            {
+              type: 3,
+              custom_id: "vote:grund:" + encoded,
+              placeholder: "Grund auswählen …",
+              min_values: 1,
+              max_values: 1,
+              options: [
+                {
+                  label: "Gear (⚔️)",
+                  value: "gear",
+                  description: "Direktes Upgrade",
+                },
+                {
+                  label: "Trait (💠)",
+                  value: "trait",
+                  description: "Build-Trait",
+                },
+                {
+                  label: "Litho (📜)",
+                  value: "litho",
+                  description: "Rezept/Schrift",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      ephemeral: true,
     });
   }
 
-  // Kein Item über Autocomplete: alter Weg → Modal öffnen
+  // Sonst → klassisches Modal öffnen
   const modal = makeVoteModal();
-
-  // Defensive: verschiedene Adapter-APIs unterstützen
-  if (typeof ctx.showModal === "function") {
-    return ctx.showModal(modal);
-  }
-  if (typeof ctx.replyModal === "function") {
-    return ctx.replyModal(modal);
-  }
-  // Fallback: einige Adapter akzeptieren reply({ modal: ... })
+  if (typeof ctx.showModal === "function") return ctx.showModal(modal);
+  if (typeof ctx.replyModal === "function") return ctx.replyModal(modal);
   return ctx.reply(modal, { modal: true });
 }
 
-// -----------------
+// ------------------
 // Modal-Erstellung
-// -----------------
+// ------------------
 export function makeVoteModal() {
   return {
     custom_id: "vote:modal",
@@ -106,16 +108,16 @@ export function makeVoteModal() {
             label: "Item (z. B. Schwert, Ring, Bogen …)",
             placeholder: "Schwert der Abenddämmerung",
             required: true,
-            max_length: 120
-          }
-        ]
-      }
-    ]
+            max_length: 120,
+          },
+        ],
+      },
+    ],
   };
 }
 
 // -----------------------------
-// Modal-Submit -> Grund-Dropdown
+// Modal-Submit → Grund-Dropdown
 // -----------------------------
 export async function handleModalSubmit(ctx) {
   const comps = ctx.interaction?.data?.components ?? [];
@@ -128,69 +130,82 @@ export async function handleModalSubmit(ctx) {
   }
 
   const encoded = b64uEncode(itemName);
-  const optionsArr = [
-    { label: "Gear (⚔️)",  value: "gear",  description: "Direktes Upgrade" },
-    { label: "Trait (💠)", value: "trait", description: "Build-Trait" },
-    { label: "Litho (📜)", value: "litho", description: "Rezept/Schrift" },
-  ];
 
   return ctx.reply(
     {
       content: `Wähle den Grund für **${itemName}**:`,
-      components: [asStringSelect("Grund auswählen …", "vote:grund:" + encoded, optionsArr)]
+      components: [
+        {
+          type: 1,
+          components: [
+            {
+              type: 3,
+              custom_id: "vote:grund:" + encoded,
+              placeholder: "Grund auswählen …",
+              min_values: 1,
+              max_values: 1,
+              options: [
+                {
+                  label: "Gear (⚔️)",
+                  value: "gear",
+                  description: "Direktes Upgrade",
+                },
+                {
+                  label: "Trait (💠)",
+                  value: "trait",
+                  description: "Build-Trait",
+                },
+                {
+                  label: "Litho (📜)",
+                  value: "litho",
+                  description: "Rezept/Schrift",
+                },
+              ],
+            },
+          ],
+        },
+      ],
     },
     { ephemeral: true }
   );
 }
 
-// -----------------------------------------------------
-// Dropdown-Auswahl -> Persistenz + Bestätigungs-Nachricht
-// -----------------------------------------------------
+// ----------------------------------------------------
+// Dropdown-Auswahl (ctx.item + ctx.reason) → Save Vote
+// ----------------------------------------------------
 export async function handleReasonSelect(ctx) {
   const itemName = normalizeItem(ctx.item);
-  const reason   = (ctx.reason ?? "").trim(); // gear|trait|litho
+  const reason = (ctx.reason ?? "").trim();
 
-  if (!itemName)  return ctx.followUp("Item fehlt.", { ephemeral: true });
-  if (!VALID_REASONS.has(reason)) {
+  if (!itemName) {
+    return ctx.followUp("Item fehlt.", { ephemeral: true });
+  }
+  if (!isValidReason(reason)) {
     return ctx.followUp("Ungültiger Grund.", { ephemeral: true });
   }
 
-  const slug = slugify(itemName);
-  const nameFirst = prettyName(itemName);
-
-  // Doppelvote verhindern (pro guild/user/slug)
-  const check = await ctx.db.query(
-    `SELECT 1
-       FROM votes
-      WHERE guild_id=$1 AND user_id=$2 AND item_slug=$3
-      LIMIT 1`,
-    [ctx.guildId, ctx.userId, slug]
+  const result = await saveVote(
+    {
+      guild_id: ctx.guildId,
+      user_id: ctx.userId,
+      item_name: itemName,
+      reason,
+    },
+    ctx.db
   );
-  if (check.rowCount > 0) {
+
+  if (!result.ok && result.alreadyVoted) {
     return ctx.followUp(
-      `Du hast bereits für **${nameFirst}** gevotet.\n` +
-      `Ändern: erst \`/vote-remove item:${nameFirst}\`, dann neu voten.`,
+      `Du hast bereits für **${result.item_name_first}** gevotet.\n` +
+        `Ändern: erst \`/vote-remove item:${result.item_name_first}\`, dann neu voten.`,
       { ephemeral: true }
     );
   }
 
-  // ✅ Insert: type = Grund, und reason = type (wegen NOT NULL in deiner DB)
-  await ctx.db.query(
-    `INSERT INTO votes (guild_id, user_id, item_slug, type, reason, item_name_first, created_at)
-     VALUES ($1, $2, $3, $4, $4, $5, NOW())`,
-    [ctx.guildId, ctx.userId, slug, reason, nameFirst]
+  return ctx.followUp(
+    `✅ Vote gespeichert:\n• **Item:** ${result.item_name_first}\n• **Grund:** ${prettyReason(
+      reason
+    )}`,
+    { ephemeral: true }
   );
-
-  // Item registrieren, falls unbekannt
-  await ctx.db.query(
-    `INSERT INTO items (guild_id, item_slug, item_name_first, rolled_at)
-     SELECT $1, $2, $3, NULL
-      WHERE NOT EXISTS (
-        SELECT 1 FROM items WHERE guild_id=$1 AND item_slug=$2
-      )`,
-    [ctx.guildId, slug, nameFirst]
-  );
-
-  const pretty = VALID_REASONS.get(reason);
-  return ctx.followUp(`✅ Vote gespeichert:\n• **Item:** ${nameFirst}\n• **Grund:** ${pretty}`, { ephemeral: true });
 }
