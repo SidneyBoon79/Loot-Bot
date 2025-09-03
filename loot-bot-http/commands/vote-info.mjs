@@ -1,32 +1,26 @@
 // commands/vote-info.mjs
-// /vote-info – zeigt ein simples, anfängerfreundliches Tutorial (ephemer)
+// /vote-info – zeigt das Kurz-Tutorial (ephemer nur für den Anfragenden)
 
 export async function run(ctx) {
-  const tutorial = `# Loot-Bot – Schnellstart
+  const tutorial = `# Loot-Bot – Kurz-Tutorial
 
-## 👣 In 30 Sekunden starten
-1) **/vote** – Schreib dein **Item** rein und wähl den **Grund**:
-   ⚔️ Gear • 💠 Trait • 📜 Litho
-2) **/vote-show** – Schau, was aktuell zur Auswahl steht (Fenster: ~48h ab dem ersten Vote).
-3) **/vote-remove** – Upps? Zieh deinen Vote wieder zurück.
+## 🌱 Für alle User
+- **/vote** – Item + Grund abgeben (Gründe: ⚔️ Gear > 💠 Trait > 📜 Litho)
+- **/vote-show** – Aktuelle Votes (Fenster 48h ab dem **ersten** Vote)
+- **/vote-remove** – Eigenen Vote für ein Item löschen
+- **/winner** – Listet Gewinner kompakt
 
-## 🎯 Wie wird entschieden? (fair & simpel)
-Bei Auslosungen zählt: **Grund** > **Wins (letzte 48h)** > **Würfelzahl**.
-Heißt: Gear hat Vorrang vor Trait vor Litho; wer schon oft gewonnen hat, rutscht etwas nach hinten.
+## ⚖️ Fairness
+Sortierung bei Rolls: **Grund** > **Wins (letzte 48h)** > **Wurfzahl**.
 
-## 🎲 Auslosung (für Mods)
-- **/roll** – Ein **Item** aus der Liste auswählen und **jetzt** auswürfeln.
-- **/roll-all** – Alle **offenen** Items nacheinander auswürfeln (Reihenfolge zufällig).
-- **/reroll** – Ein **bereits gerolltes** Item nochmal würfeln:
-  • Alter Gewinner: **–1 Win** (min. 0)
-  • Neuer Gewinner: **+1 Win**
-  • \`rolled_by\`/\`rolled_at\` werden aktualisiert
-  • Gewinner bleibt gleich → **keine** Win-Änderung
+## 🎲 Auslosung (Admin/Mods)
+- **/roll** – Mods wählen *manuell* ein Item (Dropdown), rollt nur dieses
+- **/roll-all** – rollt alle **nicht** gerollten Items in zufälliger Reihenfolge
+- **/reroll** – erlaubt einen erneuten Roll für bereits gerollte Items (Wins werden umgebucht)
 
-## 🏆 Gewinner & Übersicht (für Mods)
-- **/winner** – Kompakte Gewinnerliste der letzten ~48h.
-- **/reducew** – Wins eines Users **senken** (User wählen + Anzahl).
-- **/vote-clear** – **Reset**: löscht Votes, Items, Wins (nur wenn ihr wirklich neu starten wollt).
+## 🛡️ Admin/Mods
+- **/vote-clear** – Reset (Votes, Items, Wins)
+- **/reducew** – Wins reduzieren (User auswählen + Anzahl)
 `;
 
   await ctx.reply(tutorial, { ephemeral: true });
