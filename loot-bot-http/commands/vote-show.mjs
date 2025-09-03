@@ -1,56 +1,52 @@
-// commands/vote-show.mjs — öffentlicher Überblick (48h), mit Gear/Trait/Litho ausgeschrieben + Emojis
-const WEIGHT = { gear: 3, trait: 2, litho: 1 };
-const LABEL  = { gear: "⚔️ Gear", trait: "💠 Trait", litho: "📜 Litho" };
+// commands/vote-show.mjs
+// Öffentliche Übersicht aller Items mit Votes der letzten 48h
 
-function fmtCount(n){ return new Intl.NumberFormat("de-DE").format(Number(n)||0); }
+export const command = {
+  name: "vote-show",
+  description: "Zeigt alle Votes der letzten 48h"
+};
 
 export async function run(ctx) {
-  await ctx.defer({ ephemeral: false });
-
-  const { rows } = await ctx.db.query(
-    `SELECT
-       v.item_slug,
-       MAX(v.item_name_first) AS item_name_first,
-       SUM(CASE WHEN v.type='gear'  THEN 1 ELSE 0 END) AS c_gear,
-       SUM(CASE WHEN v.type='trait' THEN 1 ELSE 0 END) AS c_trait,
-       SUM(CASE WHEN v.type='litho' THEN 1 ELSE 0 END) AS c_litho,
-       COUNT(*) AS c_total,
-       BOOL_OR(i.rolled_at IS NOT NULL OR COALESCE(i.rolled_manual,false)) AS rolled
-     FROM votes v
-     LEFT JOIN items i
-            ON i.guild_id = v.guild_id
-           AND i.item_slug = v.item_slug
-     WHERE v.guild_id = $1
-       AND v.created_at >= NOW() - INTERVAL '48 hours'
-     GROUP BY v.item_slug`,
+  // Items + Votes der letzten 48h laden
+  const res = await ctx.db.query(
+    `SELECT i.item_name_first,
+            i.item_slug,
+            i.rolled_at,
+            array_agg(json_build_object(
+              'user_id', v.user_id,
+              'type', v.type
+            )) AS votes
+       FROM items i
+       JOIN votes v
+         ON i.guild_id = v.guild_id
+        AND i.item_slug = v.item_slug
+      WHERE i.guild_id = $1
+        AND v.created_at > NOW() - INTERVAL '48 hours'
+      GROUP BY i.item_name_first, i.item_slug, i.rolled_at
+      ORDER BY i.item_name_first ASC`,
     [ctx.guildId]
   );
 
-  if (!rows.length) {
-    return ctx.followUp("Keine gültigen Votes im 48h-Fenster. ✨", { ephemeral: false });
+  if (res.rowCount === 0) {
+    return ctx.reply("Keine Votes in den letzten 48h.", { ephemeral: true });
   }
 
-  const items = rows.map(r => {
-    const counts = { gear: Number(r.c_gear)||0, trait: Number(r.c_trait)||0, litho: Number(r.c_litho)||0 };
-    const top = (["gear","trait","litho"]).sort((a,b) => (counts[b]-counts[a]) || (WEIGHT[b]-WEIGHT[a]))[0];
-    return { name: r.item_name_first, slug: r.item_slug, counts, total: Number(r.c_total)||0, top, rolled: !!r.rolled };
-  }).sort((a,b) => {
-    const w = WEIGHT[a.top] - WEIGHT[b.top];
-    if (w !== 0) return -(w);
-    if (a.total !== b.total) return b.total - a.total;
-    return (a.name||"").localeCompare(b.name||"", "de");
-  });
+  // Formatierung
+  const lines = [];
+  for (const row of res.rows) {
+    const status = row.rolled_at ? "🔴" : "🟢";
+    const voters = (row.votes || [])
+      .map(v => {
+        const emoji =
+          v.type === "gear" ? "⚔️" :
+          v.type === "trait" ? "💠" :
+          v.type === "litho" ? "📜" : "❔";
+        return `${emoji} <@${v.user_id}>`;
+      })
+      .join(", ");
 
-  const lines = items.map(it => {
-    const flag = it.rolled ? "🔴" : "🟢";
-    const detail =
-      `${LABEL.gear} ${fmtCount(it.counts.gear)} · ` +
-      `${LABEL.trait} ${fmtCount(it.counts.trait)} · ` +
-      `${LABEL.litho} ${fmtCount(it.counts.litho)}`;
-    return `${flag} **${it.name}** — ${fmtCount(it.total)} Stimmen (${detail})`;
-  });
+    lines.push(`${status} **${row.item_name_first}** — ${voters}`);
+  }
 
-  const header = `**Votes der letzten 48h (${fmtCount(items.length)} Items):**\n` +
-                 `🟢 nicht gerollt · 🔴 bereits gerollt`;
-  return ctx.followUp(header + `\n\n` + lines.join("\n"), { ephemeral: false });
+  return ctx.reply(lines.join("\n"));
 }
