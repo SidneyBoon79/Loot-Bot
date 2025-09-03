@@ -3,10 +3,6 @@
 // Regeln:
 // - Autocomplete liefert max. 25 Treffer
 // - Leere Eingabe -> KEINE Vorschläge ([])
-//
-// Nutzung:
-//   import { searchItems, getItemsCatalog } from "../services/itemsCatalog.mjs";
-//   const names = await searchItems(userInput);
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -75,7 +71,6 @@ export async function searchItems(query) {
 
   const { list } = await getItemsCatalog();
 
-  // Schnelle lineare Suche – performant genug für einige 10k Items in-memory.
   const exact = [];
   const prefix = [];
   const contains = [];
@@ -88,7 +83,6 @@ export async function searchItems(query) {
     } else if (x.norm.includes(q)) {
       contains.push(x.display);
     }
-    // Early-exit optional: wenn genug Treffer – aber wir mergen später ohnehin
   }
 
   // Zusammenführen & auf 25 begrenzen
@@ -96,13 +90,13 @@ export async function searchItems(query) {
   return merged.slice(0, 25);
 }
 
-/** Optional: prüft, ob ein Item im Katalog existiert (nach Normalisierung). */
+/** Prüft, ob ein Item im Katalog existiert (nach Normalisierung). */
 export async function isInCatalog(displayName) {
   const { set } = await getItemsCatalog();
   return set.has(normalizeName(displayName));
 }
 
-/** Hilfsfunktion, um den Cache manuell zu leeren (z. B. bei Hot-Reload). */
+/** Hilfsfunktion: Cache leeren (z. B. bei Hot-Reload). */
 export function resetItemsCatalogCache() {
   CACHE = null;
 }
