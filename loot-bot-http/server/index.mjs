@@ -21,24 +21,16 @@ function verifySignature(publicKey, signature, timestamp, bodyRaw) {
 const app = express();
 
 // Wir brauchen den *rohen* Body für die Signaturprüfung.
-// Kein bodyParser.json() hier, sondern raw:
-app.use(
-  "/interactions",
-  express.raw({ type: "*/*" }) // roher Buffer in req.body
-);
+app.use("/interactions", express.raw({ type: "*/*" }));
 
-// POST /interactions – Discord schickt hier alles hin
 app.post("/interactions", async (req, res) => {
   const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
-  if (!PUBLIC_KEY) {
-    return res.status(500).send("Missing DISCORD_PUBLIC_KEY");
-  }
+  if (!PUBLIC_KEY) return res.status(500).send("Missing DISCORD_PUBLIC_KEY");
 
   // 1) Signatur prüfen
   const sig = req.header("X-Signature-Ed25519");
   const ts  = req.header("X-Signature-Timestamp");
   const bodyRaw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || "");
-
   if (!sig || !ts || !verifySignature(PUBLIC_KEY, sig, ts, bodyRaw)) {
     return res.status(401).send("Bad signature");
   }
@@ -47,16 +39,14 @@ app.post("/interactions", async (req, res) => {
   let interaction;
   try {
     interaction = JSON.parse(bodyRaw.toString("utf8"));
-  } catch (e) {
+  } catch {
     return res.status(400).send("Invalid JSON");
   }
 
   // 3) PING-Handshake (type 1)
-  if (interaction?.type === 1) {
-    return res.json({ type: 1 }); // PONG
-  }
+  if (interaction?.type === 1) return res.json({ type: 1 });
 
-  // 4) Context bauen (wie zuvor) – aber jetzt aus dem schon geparsten Body
+  // 4) Context bauen
   const ctx = makeCtx(interaction, res);
 
   try {
@@ -75,6 +65,13 @@ app.listen(PORT, () => {
 // ------------------------------------------------------
 // Context-Builder
 // ------------------------------------------------------
+function normalizeMsgData(data) {
+  // Erlaubt string ODER vollständiges data-Objekt
+  if (data == null) return {};
+  if (typeof data === "string") return { content: data };
+  return data;
+}
+
 function makeCtx(interaction, res) {
   return {
     interaction,
@@ -95,29 +92,24 @@ function makeCtx(interaction, res) {
         return res.json({ type: 8, data: { choices } });
       }
     },
+
     reply: (data, opts = {}) => {
-      const payload = {
-        type: 4,
-        data: {
-          ...data,
-          flags: opts.ephemeral ? 64 : 0
-        }
-      };
-      return res.json(payload);
+      const payloadData = normalizeMsgData(data);
+      payloadData.flags = opts.ephemeral ? 64 : (payloadData.flags ?? 0);
+      return res.json({ type: 4, data: payloadData });
     },
+
     update: (data) => {
-      return res.json({ type: 7, data });
+      const payloadData = normalizeMsgData(data);
+      return res.json({ type: 7, data: payloadData });
     },
+
     followUp: (msg, opts = {}) => {
-      const payload = {
-        type: 4,
-        data: {
-          content: msg,
-          flags: opts.ephemeral ? 64 : 0
-        }
-      };
-      return res.json(payload);
+      const payloadData = normalizeMsgData({ content: msg });
+      payloadData.flags = opts.ephemeral ? 64 : (payloadData.flags ?? 0);
+      return res.json({ type: 4, data: payloadData });
     },
+
     showModal: (modal) => {
       return res.json({ type: 9, data: modal });
     }
