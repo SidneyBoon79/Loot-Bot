@@ -7,10 +7,9 @@ export async function handleVoteItemAutocomplete(ctx) {
   try {
     // Aktuell vom User getippter Wert
     const focused =
-      (typeof ctx.getFocusedOptionValue === "function"
-        ? ctx.getFocusedOptionValue()
-        : ctx.interaction?.data?.options?.find?.(o => o.focused)?.value
-      ) || "";
+      (typeof ctx.getFocusedOptionValue === "function" && ctx.getFocusedOptionValue()) ||
+      ctx.interaction?.data?.options?.find?.(o => o.focused)?.value ||
+      "";
 
     // Suche im Katalog
     const results = await searchItems(focused);
@@ -22,11 +21,13 @@ export async function handleVoteItemAutocomplete(ctx) {
     }));
 
     // Antwort senden
-    return ctx.respond(choices);
+    if (typeof ctx.respond === "function") {
+      return ctx.respond(choices);
+    }
   } catch (err) {
     console.error("[autocomplete/vote-item] error:", err);
     if (typeof ctx.respond === "function") {
-      return ctx.respond([]); // Leere Antwort, falls Fehler
+      return ctx.respond([]); // Leere Antwort bei Fehler
     }
   }
 }
