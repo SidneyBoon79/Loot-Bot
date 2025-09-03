@@ -1,166 +1,59 @@
-// commands/reducew.mjs — Winners-only Dropdown (keine Serverliste), Name-Cache mit Fallback, Modal zum Reduzieren
+// commands/reducew.mjs
+// Reduziert die Win-Zahl eines Users (nur für Mods/Admins)
 
-function fmt(n) {
-  return new Intl.NumberFormat("de-DE").format(Number(n) || 0);
-}
+export const command = {
+  name: "reducew",
+  description: "Reduziert die Win-Zahl eines Users",
+  options: [
+    {
+      type: 6, // USER
+      name: "user",
+      description: "Wähle den User aus",
+      required: true
+    },
+    {
+      type: 4, // INTEGER
+      name: "anzahl",
+      description: "Um wie viele Wins reduzieren?",
+      required: true,
+      min_value: 1
+    }
+  ]
+};
 
-/**
- * /reducew
- * Zeigt NUR User aus wins (win_count > 0).
- * Label = gecachter Name aus members.display_name, sonst ID-Fallback.
- * Keine REST-Lookups, serverless-safe.
- */
 export async function run(ctx) {
-  ctx.requireMod?.();
-
-  const { rows } = await ctx.db.query(
-    `SELECT w.user_id,
-            w.win_count,
-            COALESCE(m.display_name, w.user_id::text) AS display_name
-       FROM wins w
-       LEFT JOIN members m
-              ON m.guild_id = w.guild_id
-             AND m.user_id  = w.user_id
-      WHERE w.guild_id = $1
-        AND w.win_count > 0
-      ORDER BY w.win_count DESC, display_name ASC
-      LIMIT 25`,
-    [ctx.guildId]
-  );
-
-  if (!rows.length) {
-    return ctx.reply("Keine User mit Wins vorhanden. ✅", { ephemeral: true });
+  // Berechtigung prüfen
+  if (!ctx.member?.permissions?.includes("MANAGE_GUILD")) {
+    return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
   }
 
-  const options = rows.map(r => ({
-    // Discord rendert im Select keine Mentions → Klartext-Name aus Cache oder ID
-    label: `${r.display_name} · W${fmt(r.win_count)}`,
-    value: String(r.user_id),
-    description: `aktueller Stand: W${fmt(r.win_count)}`
-  }));
+  const user = ctx.opts.getUser("user");
+  const amount = ctx.opts.getInteger("anzahl");
 
-  const selectRow = {
-    type: 1,
-    components: [
-      {
-        type: 3, // STRING_SELECT
-        custom_id: "reducew:userpick",
-        placeholder: "User mit Wins auswählen …",
-        min_values: 1,
-        max_values: 1,
-        options
-      }
-    ]
-  };
+  if (!user || !amount) {
+    return ctx.reply("Bitte User und Anzahl angeben.", { ephemeral: true });
+  }
+
+  // Update in DB
+  const res = await ctx.db.query(
+    `UPDATE wins
+        SET win_count = GREATEST(win_count - $3, 0),
+            updated_at = NOW()
+      WHERE guild_id = $1 AND user_id = $2
+      RETURNING win_count`,
+    [ctx.guildId, user.id, amount]
+  );
+
+  if (res.rowCount === 0) {
+    return ctx.reply(`Keine Wins für <@${user.id}> gefunden.`, {
+      ephemeral: true
+    });
+  }
+
+  const newCount = res.rows[0].win_count;
 
   return ctx.reply(
-    {
-      content: "Wähle den User, dessen Wins reduziert werden sollen:",
-      components: [selectRow]
-    },
-    { ephemeral: true }
-  );
-}
-
-/** Baut das Modal; currentWins nur zur Info im Titel. */
-export function makeModal(userId, currentWins = null) {
-  const hint = currentWins == null ? "" : ` (aktuell: W${fmt(currentWins)})`;
-  return {
-    custom_id: "reducew:modal",
-    title: `Wins reduzieren${hint}`,
-    components: [
-      {
-        type: 1,
-        components: [
-          {
-            type: 4,
-            custom_id: "reducew:user",
-            style: 1,
-            label: "User ID",
-            value: String(userId),
-            required: true
-          }
-        ]
-      },
-      {
-        type: 1,
-        components: [
-          {
-            type: 4,
-            custom_id: "reducew:count",
-            style: 1,
-            label: "Anzahl (mind. 1)",
-            placeholder: "1",
-            required: true
-          }
-        ]
-      }
-    ]
-  };
-}
-
-/**
- * Wird vom server.mjs bei Auswahl im Select aufgerufen:
- * Öffnet das Modal mit dem aktuellen Stand (falls vorhanden).
- */
-export async function handleSelect(ctx) {
-  ctx.requireMod?.();
-
-  const pickedUserId = ctx.interaction?.data?.values?.[0];
-  if (!pickedUserId) {
-    return ctx.reply("❌ Kein User ausgewählt.", { ephemeral: true });
-  }
-
-  const cur = await ctx.db.query(
-    `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
-    [ctx.guildId, pickedUserId]
-  );
-  const currentWins = cur.rows[0]?.win_count ?? 0;
-
-  if (currentWins <= 0) {
-    return ctx.reply(`❌ <@${pickedUserId}> hat keine Wins.`, { ephemeral: true });
-  }
-
-  const modal = makeModal(pickedUserId, currentWins);
-  // Roh-Modal zurückgeben (server.mjs leitet 1:1 weiter)
-  return ctx.reply({ type: 9, data: modal });
-}
-
-/** Modal-Submit: reduziert Wins (niemals unter 0). */
-export async function handleModalSubmit(ctx) {
-  const comps = ctx.interaction?.data?.components ?? [];
-  const userComp  = comps[0]?.components?.[0];
-  const countComp = comps[1]?.components?.[0];
-
-  const targetUser = (userComp?.value || "").trim();
-  const rawCount   = (countComp?.value || "").trim();
-  const delta = Math.max(1, Math.floor(Number(rawCount)));
-
-  if (!targetUser) return ctx.followUp("❌ User fehlt.", { ephemeral: true });
-  if (!Number.isFinite(delta) || delta < 1) return ctx.followUp("❌ Ungültige Anzahl.", { ephemeral: true });
-
-  const cur = await ctx.db.query(
-    `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
-    [ctx.guildId, targetUser]
-  );
-  const before = cur.rows[0]?.win_count ?? 0;
-
-  if (before <= 0) {
-    return ctx.followUp(`User <@${targetUser}> hat bereits (W0). Nichts zu tun.`, { ephemeral: true });
-  }
-
-  const after = Math.max(0, Number(before) - delta);
-
-  await ctx.db.query(
-    `UPDATE wins
-        SET win_count = $3,
-            updated_at = NOW()
-      WHERE guild_id=$1 AND user_id=$2`,
-    [ctx.guildId, targetUser, after]
-  );
-
-  return ctx.followUp(
-    `Wins für <@${targetUser}> um ${fmt(delta)} reduziert. Neuer Stand: (W${fmt(after)})`,
+    `✅ Wins für <@${user.id}> um ${amount} reduziert.\nNeuer Stand: ${newCount}`,
     { ephemeral: true }
   );
 }
