@@ -1,12 +1,8 @@
 // db/votes.mjs
 // Helfer-Funktionen für Votes & Items.
-// Erwartetes Schema (aus deinem Projekt):
+// Erwartetes Schema:
 //   votes(guild_id, user_id, item_slug, type, reason, item_name_first, created_at)
 //   items(guild_id, item_slug, item_name_first, rolled_at, rolled_by, rolled_manual)
-//
-// Nutzung:
-//   import { saveVote, hasUserVoted, registerItemIfMissing } from "../db/votes.mjs";
-//   await saveVote({ guild_id, user_id, item_name, reason }, ctx.db);
 
 function slugify(name) {
   return String(name || "")
