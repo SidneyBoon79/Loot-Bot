@@ -1,85 +1,63 @@
 // server/interactionRouter.mjs
-// Zentraler Router für alle Discord-Interaction-Typen
+// Minimaler Router: verdrahtet /vote-info zuverlässig.
+// (Andere Commands können wir danach schrittweise dazuhängen.)
 
-// Commands
-import * as vote from "../commands/vote.mjs";
+import * as voteInfo from "../commands/vote-info.mjs";
 
-// Router für Components, Autocomplete und Modals
-import { onComponent } from "../interactions/components/index.mjs";
-import { onAutocomplete } from "../interactions/autocomplete/index.mjs";
-import { onModalSubmit } from "../interactions/modals/index.mjs";
+/**
+ * Baut eine schlanke Options-API wie ctx.opts.getString(...)
+ */
+function buildOptsAPI(interaction) {
+  const list = interaction?.data?.options ?? [];
+  const byName = new Map(list.map(o => [o.name, o]));
 
-// Command-Registry – später kannst du hier weitere Commands hinzufügen
-const COMMANDS = {
-  [vote.command?.name || "vote"]: vote,
-};
-
-// Hilfsfunktionen für Adapter-Kompatibilität
-function getType(ctx) {
-  if (typeof ctx.type === "function") return ctx.type();
-  return ctx.interaction?.type ?? null;
-}
-function getCommandName(ctx) {
-  if (typeof ctx.commandName === "function") return ctx.commandName();
-  return ctx.interaction?.data?.name ?? "";
+  return {
+    getString:  (name) => byName.get(name)?.value ?? null,
+    getInteger: (name) => byName.get(name)?.value ?? null,
+    getUser:    (name) => byName.get(name)?.value ?? null
+  };
 }
 
 /**
- * Zentraler Einstiegspunkt: routet eine Interaction basierend auf ihrem Typ.
- * @param {object} ctx - Context/Adapter-Objekt
+ * Führt die Interaction aus. Nur /vote-info ist aktiv verdrahtet.
  */
 export async function routeInteraction(ctx) {
-  try {
-    const type = getType(ctx);
+  const type = ctx.type?.();
 
-    switch (type) {
-      // 2 = APPLICATION_COMMAND
-      case 2: {
-        const name = getCommandName(ctx);
-        const cmd = COMMANDS[name];
-        if (!cmd?.run) {
-          if (typeof ctx.reply === "function") {
-            await ctx.reply("Befehl nicht gefunden.", { ephemeral: true });
-          }
-          return;
-        }
-        return cmd.run(ctx);
-      }
+  // 2 = APPLICATION_COMMAND
+  if (type === 2) {
+    const name = ctx.commandName?.();
 
-      // 3 = MESSAGE_COMPONENT (Selects/Buttons)
-      case 3: {
-        return onComponent(ctx);
-      }
+    // ---- /vote-info -----------------------------------
+    if (name === "vote-info") {
+      try {
+        // Minimales ctx, das vote-info benötigt
+        const execCtx = {
+          interaction: ctx.interaction,
+          reply: ctx.reply,
+          followUp: ctx.followUp,
+          showModal: ctx.showModal,
+          guildId: ctx.guildId?.(),
+          userId: ctx.userId?.(),
+          member: ctx.interaction?.member ?? null,
+          opts: buildOptsAPI(ctx.interaction)
+        };
 
-      // 4 = APPLICATION_COMMAND_AUTOCOMPLETE
-      case 4: {
-        return onAutocomplete(ctx);
-      }
-
-      // 5 = MODAL_SUBMIT
-      case 5: {
-        return onModalSubmit(ctx);
-      }
-
-      // andere/unbekannte Typen → noop
-      default: {
-        if (typeof ctx.respond === "function") {
-          return ctx.respond([]); // z. B. für verirrte Autocomplete-Events
-        }
-        return;
+        return await voteInfo.run(execCtx);
+      } catch (err) {
+        console.error("[router] vote-info error:", err);
+        return ctx.reply("Upps. Da ging was schief.", { ephemeral: true });
       }
     }
-  } catch (err) {
-    console.error("[interactionRouter] fatal:", err);
+    // ---------------------------------------------------
 
-    if (typeof ctx.update === "function") {
-      return ctx.update({
-        content: "Upps. Da ist was schiefgelaufen.",
-        components: [],
-      });
-    }
-    if (typeof ctx.reply === "function") {
-      return ctx.reply("Upps. Da ist was schiefgelaufen.", { ephemeral: true });
-    }
+    // Noch nicht verdrahtete Commands -> nette Fehlermeldung
+    return ctx.reply(
+      `Befehl **/${name}** ist noch nicht verdrahtet.`,
+      { ephemeral: true }
+    );
   }
+
+  // Unbekannter Interaktionstyp → still zurück
+  return;
 }
