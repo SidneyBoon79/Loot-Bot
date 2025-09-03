@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node server.mjs",
     "register": "node register-commands.mjs"
+    "migrate": "node db/migrate.mjs"
   },
   "dependencies": {
     "discord-interactions": "^3.3.0",
