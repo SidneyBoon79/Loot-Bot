@@ -1,6 +1,6 @@
 // services/wins.mjs
 // DB-Layer für persistente Wins (Railway Postgres).
-// ENV: DATABASE_URL (postgres://...)
+// Führt beim Boot eine Schema-Prüfung mit sanfter Migration durch.
 // ESM: "type": "module"
 
 import { Pool } from "pg";
@@ -9,9 +9,7 @@ let _pool = null;
 function pool() {
   if (_pool) return _pool;
   const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error("DATABASE_URL fehlt (ENV).");
-  }
+  if (!connectionString) throw new Error("DATABASE_URL fehlt (ENV).");
   _pool = new Pool({
     connectionString,
     ssl: { rejectUnauthorized: false }, // Railway/Neon kompatibel
@@ -20,28 +18,67 @@ function pool() {
   return _pool;
 }
 
-// -- Schema & Bootstrap -------------------------------------------------------
-
+/**
+ * Schema-Setup + Migration:
+ *  - legt Tabelle wins an, falls sie fehlt
+ *  - ergänzt fehlende Spalten (winner_user_id etc.)
+ *  - migriert Legacy 'user_id' -> 'winner_user_id' (falls vorhanden)
+ *  - Indizes + PK sicherstellen
+ */
 export async function ensureSchema() {
   const sql = `
-    CREATE TABLE IF NOT EXISTS wins (
-      guild_id TEXT NOT NULL,
-      item_slug TEXT NOT NULL,
-      item_name_first TEXT NOT NULL,
-      winner_user_id TEXT NOT NULL,
-      reason TEXT,                      -- 'gear' | 'trait' | 'litho'
-      rolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      roll_value INT,
-      win_count INT DEFAULT 1,
-      PRIMARY KEY (guild_id, item_slug, winner_user_id)
-    );
+  BEGIN;
 
-    -- Optional: schnelle Filter auf Gilde/Item und Zeit
-    CREATE INDEX IF NOT EXISTS wins_guild_time_idx
-      ON wins (guild_id, rolled_at DESC);
+  -- 1) Basistabelle (nur falls nicht vorhanden)
+  CREATE TABLE IF NOT EXISTS wins (
+    guild_id TEXT NOT NULL,
+    item_slug TEXT NOT NULL,
+    item_name_first TEXT NOT NULL,
+    winner_user_id TEXT NOT NULL,
+    reason TEXT,                      -- 'gear' | 'trait' | 'litho'
+    rolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    roll_value INT,
+    win_count INT DEFAULT 1
+  );
 
-    CREATE INDEX IF NOT EXISTS wins_guild_item_idx
-      ON wins (guild_id, item_slug);
+  -- 2) Fehlende Spalten ergänzen (sanfte Migration)
+  ALTER TABLE wins ADD COLUMN IF NOT EXISTS guild_id TEXT;
+  ALTER TABLE wins ADD COLUMN IF NOT EXISTS item_slug TEXT;
+  ALTER TABLE wins ADD COLUMN IF NOT EXISTS item_name_first TEXT;
+  ALTER TABLE wins ADD COLUMN IF NOT EXISTS winner_user_id TEXT;
+  ALTER TABLE wins ADD COLUMN IF NOT EXISTS reason TEXT;
+  ALTER TABLE wins ADD COLUMN IF NOT EXISTS rolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+  ALTER TABLE wins ADD COLUMN IF NOT EXISTS roll_value INT;
+  ALTER TABLE wins ADD COLUMN IF NOT EXISTS win_count INT DEFAULT 1;
+
+  -- 3) Legacy-Migration: user_id -> winner_user_id (falls alte Spalte existiert)
+  DO $$
+  BEGIN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_name = 'wins' AND column_name = 'user_id'
+    ) THEN
+      EXECUTE 'UPDATE wins SET winner_user_id = COALESCE(winner_user_id, user_id)';
+    END IF;
+  END$$;
+
+  -- 4) Indizes
+  CREATE INDEX IF NOT EXISTS wins_guild_time_idx ON wins (guild_id, rolled_at);
+  CREATE INDEX IF NOT EXISTS wins_guild_item_idx ON wins (guild_id, item_slug);
+
+  -- 5) Eindeutigkeit/PK über (guild_id, item_slug, winner_user_id)
+  CREATE UNIQUE INDEX IF NOT EXISTS wins_pk_idx ON wins (guild_id, item_slug, winner_user_id);
+  DO $$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+       WHERE conname = 'wins_pk' AND conrelid = 'wins'::regclass
+    ) THEN
+      ALTER TABLE wins ADD CONSTRAINT wins_pk PRIMARY KEY USING INDEX wins_pk_idx;
+    END IF;
+  END$$;
+
+  COMMIT;
   `;
   await pool().query(sql);
 }
@@ -51,8 +88,7 @@ export async function ensureSchema() {
 function normalizeReason(reason) {
   if (!reason) return null;
   const r = String(reason).toLowerCase().trim();
-  if (r === "gear" || r === "trait" || r === "litho") return r;
-  return null;
+  return r === "gear" || r === "trait" || r === "litho" ? r : null;
 }
 
 function toInt(x, def = null) {
@@ -79,7 +115,6 @@ export async function insertWin({
   if (!guildId || !itemSlug || !itemNameFirst || !winnerUserId) {
     throw new Error("insertWin: guildId, itemSlug, itemNameFirst, winnerUserId erforderlich.");
   }
-
   const r = normalizeReason(reason);
   const rv = toInt(rollValue);
 
@@ -95,14 +130,13 @@ export async function insertWin({
       item_name_first = EXCLUDED.item_name_first
     RETURNING guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, win_count, rolled_at;
   `;
-
   const vals = [guildId, itemSlug, itemNameFirst, winnerUserId, r, rv, toInt(incrementBy, 1)];
   const { rows } = await pool().query(sql, vals);
   return rows[0];
 }
 
 /**
- * Win-Count manuell erhöhen (z. B. für Backfill oder Sonderfälle).
+ * Win-Count manuell erhöhen.
  */
 export async function incrementWin({ guildId, itemSlug, winnerUserId, step = 1 }) {
   if (!guildId || !itemSlug || !winnerUserId) {
@@ -139,7 +173,6 @@ export async function decrementWin({ guildId, itemSlug, winnerUserId, step = 1 }
 
 /**
  * Letzte Wins seit X Stunden (Default 48h) – optional gefiltert auf Item.
- * Nützlich für winner-Ausgaben und Reroll-Quelle.
  */
 export async function getRecentWins({ guildId, sinceHours = 48, itemSlug = null }) {
   if (!guildId) throw new Error("getRecentWins: guildId erforderlich.");
