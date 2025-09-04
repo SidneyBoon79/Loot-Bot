@@ -45,7 +45,7 @@ export default {
         description: `${it.votes} Vote(s) · letzte 48h`,
       }));
 
-      // 4) Component bauen (custom_id mit Prefix für Router)
+      // 4) Component (custom_id mit Prefix für Router)
       const customId = `roll:select:${crypto.randomUUID()}`;
       const row = {
         type: 1, // ACTION_ROW
