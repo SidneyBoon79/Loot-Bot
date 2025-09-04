@@ -1,12 +1,13 @@
 // commands/roll.mjs
-// Rollt Gewinner für ein Item anhand der letzten 48h Votes aus der DB
+// Rollt Gewinner für ein Item anhand der letzten 48h Votes aus der DB.
+// Wenn kein Item übergeben wurde, sendet der Command ein Dropdown (roll-select).
 // Fairness: Gear > Trait > Litho  →  Wins ASC  →  Wurf DESC
 // ESM: "type": "module"
 
 import { Pool } from "pg";
 import { insertWin, getUserWinsForItem } from "../services/wins.mjs"; // Pfad ggf. anpassen
 
-// ---- DB Helper (Votes lesen) ------------------------------------------------
+// ---- DB Helper --------------------------------------------------------------
 let _pool = null;
 function pool() {
   if (_pool) return _pool;
@@ -25,23 +26,39 @@ async function getVotesForItem({ guildId, itemSlug, hours = 48 }) {
        AND item_slug = $2
        AND created_at >= NOW() - ($3::text || ' hours')::interval
   `;
-  const { rows } = await pool().query([sql, [guildId, itemSlug, String(hours)]].flat());
+  const { rows } = await pool().query(sql, [guildId, itemSlug, String(hours)]);
   return rows.map(r => ({ userId: r.user_id, reason: (r.reason || "").toLowerCase() }));
+}
+
+// Items mit Votes (48h) für das Dropdown
+async function getItemsWithVotes({ guildId, hours = 48, limit = 25 }) {
+  const sql = `
+    SELECT item_slug, MAX(item_name_first) AS item_name_first, COUNT(*) AS cnt
+      FROM votes
+     WHERE guild_id = $1
+       AND created_at >= NOW() - ($2::text || ' hours')::interval
+  GROUP BY item_slug
+  ORDER BY cnt DESC, item_slug
+  LIMIT $3
+  `;
+  const { rows } = await pool().query(sql, [guildId, String(hours), limit]);
+  return rows.map(r => ({ itemSlug: r.item_slug, itemNameFirst: r.item_name_first || r.item_slug }));
 }
 
 // ---- Fairness Comparator ----------------------------------------------------
 const PRIO = { gear: 2, trait: 1, litho: 0 };
 function cmp(a, b) {
-  const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
-  if (g !== 0) return g;                          // 1) Gear > Trait > Litho
-  const w = (a.wins ?? 0) - (b.wins ?? 0);
-  if (w !== 0) return w;                          // 2) weniger Wins zuerst
-  return (b.roll ?? 0) - (a.roll ?? 0);           // 3) höherer Wurf gewinnt
+  const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0); // 1) Gear > Trait > Litho
+  if (g !== 0) return g;
+  const w = (a.wins ?? 0) - (b.wins ?? 0);                 // 2) weniger Wins zuerst
+  if (w !== 0) return w;
+  return (b.roll ?? 0) - (a.roll ?? 0);                    // 3) höherer Wurf gewinnt
 }
 
 // ---- Utils ------------------------------------------------------------------
 function d100() { return Math.floor(Math.random() * 100) + 1; }
-function formatRanking(cands, winner) {
+
+function formatRanking(cands, winner, itemNameFirst) {
   const lines = cands.map((c, i) => {
     const p = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "-";
     return `${p} <@${c.userId}> — ${c.roll} (W${c.wins ?? 0}, ${c.reason || "?"})`;
@@ -49,7 +66,7 @@ function formatRanking(cands, winner) {
   const winLine =
     `\n🏆 **Gewinner:** <@${winner.userId}> — Grund: **${winner.reason || "?"}**, ` +
     `Wurf: **${winner.roll}**, neuer Count: **W${winner.newWinCount}**`;
-  return `**🎲 Roll für:** ${winner.itemNameFirst}\n` + lines.join("\n") + winLine;
+  return `**🎲 Roll für:** ${itemNameFirst}\n` + lines.join("\n") + winLine;
 }
 
 // ---- Command-Logic ----------------------------------------------------------
@@ -60,15 +77,49 @@ export async function run(ctx) {
     ctx.options?.itemNameFirst || ctx.itemNameFirst || ctx.values?.itemNameFirst || itemSlug;
 
   if (!guildId) return ctx.reply?.({ content: "Kein Guild-Kontext.", ephemeral: true });
-  if (!itemSlug) return ctx.reply?.({ content: "Wähle ein Item im Dropdown (roll-select).", ephemeral: true });
 
+  // Kein Item übergeben → Dropdown anzeigen
+  if (!itemSlug) {
+    const items = await getItemsWithVotes({ guildId, hours: 48, limit: 25 });
+    if (!items.length) {
+      return ctx.reply?.({ content: "Keine Items mit Votes in den letzten 48h.", ephemeral: true });
+    }
+    const options = items.map(it => ({
+      label: it.itemNameFirst.slice(0, 100),
+      value: JSON.stringify({ itemSlug: it.itemSlug, itemNameFirst: it.itemNameFirst }).slice(0, 100), // Discord limit
+      description: it.itemSlug.slice(0, 100),
+    }));
+    return ctx.reply?.({
+      content: "Wähle ein Item:",
+      components: [
+        {
+          type: 1, // action row
+          components: [
+            {
+              type: 3, // string select
+              custom_id: "roll-select",
+              placeholder: "Item auswählen…",
+              min_values: 1,
+              max_values: 1,
+              options
+            }
+          ]
+        }
+      ],
+      ephemeral: true,
+    });
+  }
+
+  // Mit Item: Votes laden
   const votes = await getVotesForItem({ guildId, itemSlug, hours: 48 });
   if (!votes.length) {
     return ctx.reply?.({ content: `Keine Votes (48h) für **${itemNameFirst}**.`, ephemeral: true });
   }
 
+  // Wins-Map (gesamt, itembezogen) für Fairness
   const winsMap = await getUserWinsForItem({ guildId, itemSlug });
 
+  // Kandidaten würfeln
   const candidates = votes.map(v => ({
     userId: v.userId,
     reason: v.reason === "gear" ? "gear" : v.reason === "trait" ? "trait" : "litho",
@@ -76,6 +127,7 @@ export async function run(ctx) {
     roll: d100(),
   })).sort(cmp);
 
+  // Gewinner persistieren
   const top = candidates[0];
   const persisted = await insertWin({
     guildId,
@@ -88,15 +140,12 @@ export async function run(ctx) {
 
   const replyText = formatRanking(
     candidates,
-    { ...top, newWinCount: persisted?.win_count ?? (top.wins + 1), itemNameFirst }
+    { ...top, newWinCount: persisted?.win_count ?? (top.wins + 1) },
+    itemNameFirst
   );
   return ctx.reply?.({ content: replyText });
 }
 
 // ---- Exporte für unterschiedliche Router-Stile ------------------------------
-// 1) Named-Objekt: import { roll } from "./roll.mjs"; → roll.run(ctx)
 export const roll = { run };
-// 2) Default-Objekt: import roll from "./roll.mjs"; → roll.run(ctx)
 export default roll;
-// 3) Optionaler direkter Named-Export: import { run } from "./roll.mjs"; → run(ctx)
-//    (bereits oben exportiert)
