@@ -42,9 +42,9 @@ export default {
       const itemSlug = ctx.values?.[0];
       if (!itemSlug) {
         return ctx.reply("⚠️ Ungültige Auswahl.", { ephemeral: true });
-      }
+        }
 
-      // Item-Name ermitteln (48h-Scope)
+      // Item-Name (48h)
       const nameRows = await ctx.db.query(
         `
         SELECT MIN(v.item_name_first) AS item_name
@@ -57,7 +57,7 @@ export default {
       );
       const itemName = nameRows?.[0]?.item_name || itemSlug;
 
-      // Teilnehmer laden: pro User maximal 1 Grund (neuester in 48h), plus Wins der letzten 48h
+      // Teilnehmer: pro User maximal 1 Grund (neuester in 48h), plus Wins der letzten 48h
       const participants = await ctx.db.query(
         `
         WITH latest AS (
@@ -92,8 +92,8 @@ export default {
         return ctx.reply(`ℹ️ Keine qualifizierten Teilnehmer für **${itemName}** in den letzten 48h.`, { ephemeral: false });
       }
 
-      // Erster Wurf für alle (Anzeige & ggf. Tie-Break)
-      let rolled = participants.map(p => ({ ...p, roll: rollInt(20) })); // W20
+      // Erster Wurf für alle (W20)
+      let rolled = participants.map(p => ({ ...p, roll: rollInt(20) }));
 
       // Für Anzeige sortieren
       rolled.sort(cmpDisplay);
@@ -101,7 +101,7 @@ export default {
       // Top-Gruppe (alle, die Platz 1 teilen)
       const top = rolled.filter(e => cmpDisplay(e, rolled[0]) === 0);
 
-      // Prüft, ob vollständiger Gleichstand (Grund + Wins + Roll)
+      // Voller Gleichstand? (Grund + Wins + Roll)
       const isFullTie = (group) => {
         if (group.length < 2) return false;
         const a = group[0];
@@ -116,7 +116,7 @@ export default {
       if (isFullTie(top)) {
         // Sudden-Death nur unter Gleichauf-Teilnehmern
         let pool = top.map(x => ({ ...x }));
-        for (let i = 0; i < 10; i++) { // Sicherheitsgrenze, praktisch nie nötig
+        for (let i = 0; i < 10; i++) { // Sicherheitsgrenze
           pool = pool.map(x => ({ ...x, roll: rollInt(20) }));
           pool.sort(cmpDisplay);
           const group = pool.filter(e => cmpDisplay(e, pool[0]) === 0);
@@ -153,8 +153,8 @@ export default {
           winnerWinCount = insRows[0].win_count;
           stored = true;
         }
-      } catch (_) {
-        // Nicht kritisch: Anzeige soll trotzdem rausgehen.
+      } catch {
+        // nicht kritisch: Anzeige soll trotzdem rausgehen
       }
 
       // Anzeige-Werte finalisieren (Gewinner erhält neuen Count)
