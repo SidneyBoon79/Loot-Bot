@@ -1,5 +1,5 @@
 // scripts/register-vote-remove-http.mjs — Dependency-free Discord REST
-// Liest loot-bot-http/data/commands/vote-remove.json und registriert NUR diesen Command.
+// Liest data/commands/vote-remove.json und registriert NUR diesen Command.
 
 import fs from "fs";
 import path from "path";
@@ -13,7 +13,9 @@ if (!TOKEN || !CLIENT_ID) {
   process.exit(1);
 }
 
+// ⚠️ Korrigierter Pfad: Datei liegt unter /app/data/commands/...
 const defPath = path.resolve(process.cwd(), "data/commands/vote-remove.json");
+
 if (!fs.existsSync(defPath)) {
   console.error(`vote-remove.json nicht gefunden: ${defPath}`);
   process.exit(1);
