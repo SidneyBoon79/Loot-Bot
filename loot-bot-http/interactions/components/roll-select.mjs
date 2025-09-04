@@ -20,7 +20,8 @@ function formatLine(entry, rankIdx) {
 }
 
 export default {
-  idStartsWith: "roll:select",
+  // >>> Router-Prefix auf 'roll-select' (mit Bindestrich)
+  idStartsWith: "roll-select",
 
   run: async (ctx) => {
     try {
