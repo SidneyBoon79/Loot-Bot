@@ -13,7 +13,7 @@ if (!TOKEN || !CLIENT_ID) {
   process.exit(1);
 }
 
-const defPath = path.resolve(process.cwd(), "loot-bot-http/data/commands/vote-remove.json");
+const defPath = path.resolve(process.cwd(), "data/commands/vote-remove.json");
 if (!fs.existsSync(defPath)) {
   console.error(`vote-remove.json nicht gefunden: ${defPath}`);
   process.exit(1);
