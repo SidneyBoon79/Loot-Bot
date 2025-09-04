@@ -19,10 +19,10 @@ function pool() {
 
 /**
  * Schema-Setup (idempotent, ohne erneute PK-Erzwingung).
- * - legt Tabelle wins an (falls fehlt)
- * - ergänzt fehlende Spalten
- * - migriert altes user_id -> winner_user_id (falls vorhanden)
- * - legt sinnvolle Indizes an
+ * - Tabelle wins anlegen (falls fehlt)
+ * - fehlende Spalten ergänzen
+ * - Legacy user_id -> winner_user_id migrieren (falls vorhanden)
+ * - sinnvolle Indizes setzen (inkl. UNIQUE über (guild_id, item_slug, winner_user_id))
  */
 export async function ensureSchema() {
   const sql = `
@@ -60,10 +60,9 @@ export async function ensureSchema() {
     END IF;
   END$$;
 
-  -- Indizes (idempotent)
+  -- Indizes
   CREATE INDEX IF NOT EXISTS wins_guild_time_idx ON wins (guild_id, rolled_at);
   CREATE INDEX IF NOT EXISTS wins_guild_item_idx ON wins (guild_id, item_slug);
-  -- Eindeutigkeit statt (erneutem) Primärschlüssel – verhindert "multiple PKs"
   CREATE UNIQUE INDEX IF NOT EXISTS wins_unique_idx ON wins (guild_id, item_slug, winner_user_id);
 
   COMMIT;
@@ -71,7 +70,7 @@ export async function ensureSchema() {
   await pool().query(sql);
 }
 
-// --- Utils -------------------------------------------------------------------
+// Utils
 function normalizeReason(reason) {
   if (!reason) return null;
   const r = String(reason).toLowerCase().trim();
@@ -82,7 +81,7 @@ function toInt(x, def = null) {
   return Number.isFinite(n) ? n : def;
 }
 
-// --- Core API ----------------------------------------------------------------
+// Core API
 export async function insertWin({
   guildId,
   itemSlug,
@@ -98,10 +97,11 @@ export async function insertWin({
   const r = normalizeReason(reason);
   const rv = toInt(rollValue);
 
+  // WICHTIG: ON CONFLICT über die SPALTEN, nicht über einen Index-Namen
   const sql = `
     INSERT INTO wins (guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, win_count)
     VALUES ($1, $2, $3, $4, $5, $6, GREATEST($7, 1))
-    ON CONFLICT ON CONSTRAINT wins_unique_idx
+    ON CONFLICT (guild_id, item_slug, winner_user_id)
     DO UPDATE SET
       win_count  = wins.win_count + GREATEST(EXCLUDED.win_count, 1),
       reason     = COALESCE(EXCLUDED.reason, wins.reason),
