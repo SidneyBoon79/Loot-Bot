@@ -1,27 +1,25 @@
 // interactions/components/roll-select.mjs
+// Nutzt dieselben Fallback-Prinzipien für den Item-Namen und für wins-Join wie besprochen.
+// Sudden-Death bei vollständigem Gleichstand bleibt erhalten.
+
 import { hasModPerm } from "../../services/permissions.mjs";
 
 const PRIO = { gear: 2, trait: 1, litho: 0 };
 
 function cmpDisplay(a, b) {
-  // 1) Grund (DESC)
   const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
   if (g !== 0) return g;
-  // 2) Wins (ASC – weniger Wins bevorzugt)
   const w = (a.wins ?? 0) - (b.wins ?? 0);
   if (w !== 0) return w;
-  // 3) Wurfzahl (DESC)
   return (b.roll ?? 0) - (a.roll ?? 0);
 }
 
 function rollInt(max) {
-  return 1 + Math.floor(Math.random() * max); // 1..max
+  return 1 + Math.floor(Math.random() * max);
 }
-
-function reasonEmoji(reason) {
-  return reason === "gear" ? "⚔️" : reason === "trait" ? "💠" : "📜";
+function reasonEmoji(r) {
+  return r === "gear" ? "⚔️" : r === "trait" ? "💠" : "📜";
 }
-
 function formatLine(entry, rankIdx) {
   const medal = rankIdx === 0 ? "🥇" : rankIdx === 1 ? "🥈" : rankIdx === 2 ? "🥉" : "-";
   const prettyReason = entry.reason[0].toUpperCase() + entry.reason.slice(1);
@@ -37,28 +35,55 @@ export default {
         return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
       }
 
-      const guildId = ctx.guildId;
+      const guildId =
+        ctx?.guildId ??
+        ctx?.guild_id ??
+        ctx?.interaction?.guild_id ??
+        ctx?.guild?.id ??
+        null;
+
       const itemSlug = ctx.values?.[0];
-      if (!itemSlug) {
+      if (!guildId || !itemSlug) {
         return ctx.reply("⚠️ Ungültige Auswahl.", { ephemeral: true });
       }
 
-      // Item-Name ermitteln (48h)
-      const nameRows = await ctx.db.query(
-        `
-        SELECT MIN(v.item_name_first) AS item_name
-        FROM votes v
-        WHERE v.guild_id = $1
-          AND v.item_slug = $2
-          AND v.created_at > NOW() - INTERVAL '48 hours'
-        `,
-        [guildId, itemSlug]
-      );
-      const itemName = nameRows?.[0]?.item_name || itemSlug;
+      // Item-Name mit Fallbacks bestimmen (item_name_first -> item_name -> slug)
+      let itemName = null;
+      const p = [String(guildId), itemSlug];
 
-      // Teilnehmer laden:
-      // 1. Versuch: mit wins-Join (letzte 48h)
-      // 2. Fallback (42P01 = undefined_table): ohne wins → wins = 0
+      try {
+        const r1 = await ctx.db.query(
+          `
+          SELECT MIN(v.item_name_first) AS item_name
+          FROM votes v
+          WHERE v.guild_id = $1
+            AND v.item_slug = $2
+            AND v.created_at > NOW() - INTERVAL '48 hours'
+          `,
+          p
+        );
+        itemName = r1?.[0]?.item_name;
+      } catch (_) {}
+
+      if (!itemName) {
+        try {
+          const r2 = await ctx.db.query(
+            `
+            SELECT MIN(v.item_name) AS item_name
+            FROM votes v
+            WHERE v.guild_id = $1
+              AND v.item_slug = $2
+              AND v.created_at > NOW() - INTERVAL '48 hours'
+            `,
+            p
+          );
+          itemName = r2?.[0]?.item_name;
+        } catch (_) {}
+      }
+
+      if (!itemName) itemName = itemSlug;
+
+      // Teilnehmer mit wins-Join; Fallback, falls wins noch nicht existiert
       let participants;
       try {
         participants = await ctx.db.query(
@@ -82,17 +107,16 @@ export default {
           )
           SELECT
             l.user_id,
-            l.reason,                     -- gear|trait|litho
+            l.reason,
             COALESCE(w.wins, 0)::int AS wins
           FROM latest l
           LEFT JOIN wins48 w USING (user_id)
           ORDER BY l.user_id ASC
           `,
-          [guildId, itemSlug]
+          p
         );
       } catch (e) {
         if (e && (e.code === "42P01" || String(e.message || "").includes("relation \"wins\""))) {
-          // Fallback ohne wins
           participants = await ctx.db.query(
             `
             WITH latest AS (
@@ -111,10 +135,10 @@ export default {
             FROM latest l
             ORDER BY l.user_id ASC
             `,
-            [guildId, itemSlug]
+            p
           );
         } else {
-          throw e; // anderer Fehler → normal behandeln
+          throw e;
         }
       }
 
@@ -122,16 +146,11 @@ export default {
         return ctx.reply(`ℹ️ Keine qualifizierten Teilnehmer für **${itemName}** in den letzten 48h.`, { ephemeral: false });
       }
 
-      // Erster Wurf für alle (W20)
+      // Würfeln, sortieren, Sudden-Death
       let rolled = participants.map(p => ({ ...p, roll: rollInt(20) }));
-
-      // Für Anzeige sortieren
       rolled.sort(cmpDisplay);
-
-      // Top-Gruppe (alle, die Platz 1 teilen)
       const top = rolled.filter(e => cmpDisplay(e, rolled[0]) === 0);
 
-      // Voller Gleichstand? (Grund + Wins + Roll)
       const isFullTie = (group) => {
         if (group.length < 2) return false;
         const a = group[0];
@@ -144,9 +163,8 @@ export default {
 
       let winner = top[0];
       if (isFullTie(top)) {
-        // Sudden-Death nur unter Gleichauf-Teilnehmern
         let pool = top.map(x => ({ ...x }));
-        for (let i = 0; i < 10; i++) { // Sicherheitsgrenze
+        for (let i = 0; i < 10; i++) {
           pool = pool.map(x => ({ ...x, roll: rollInt(20) }));
           pool.sort(cmpDisplay);
           const group = pool.filter(e => cmpDisplay(e, pool[0]) === 0);
@@ -158,12 +176,11 @@ export default {
         winner._tieBreak = true;
       }
 
-      // Gewinner speichern (falls wins existiert). Bei Fehler → trotzdem Anzeige.
+      // Gewinner speichern (non-blocking)
       let stored = false;
       let winnerWinCount = (winner.wins ?? 0) + 1;
-
       try {
-        const insRows = await ctx.db.query(
+        const ins = await ctx.db.query(
           `
           WITH prev AS (
             SELECT COALESCE(MAX(win_count), 0)::int AS prev_count
@@ -177,17 +194,16 @@ export default {
           )
           SELECT win_count FROM ins
           `,
-          [guildId, itemSlug, itemName, winner.user_id, winner.reason, winner.roll]
+          [String(guildId), itemSlug, itemName, winner.user_id, winner.reason, winner.roll]
         );
-        if (insRows?.[0]?.win_count != null) {
-          winnerWinCount = insRows[0].win_count;
+        if (ins?.[0]?.win_count != null) {
+          winnerWinCount = ins[0].win_count;
           stored = true;
         }
       } catch (_) {
-        // wins existiert noch nicht o.ä. → egal, Anzeige bleibt transparent
+        // Anzeige bleibt trotzdem transparent
       }
 
-      // Anzeige-Liste final (Gewinner erhält neuen Count)
       const display = rolled.map(e => ({
         ...e,
         win_count_after: e.user_id === winner.user_id ? winnerWinCount : e.wins
