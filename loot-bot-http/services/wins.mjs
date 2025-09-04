@@ -1,5 +1,6 @@
 // services/wins.mjs
-// DB-Layer für persistente Wins (Railway Postgres).
+// DB-Layer für persistente Wins (Railway Postgres) – kompatibel zu Legacy-Schema.
+// Erkennt zur Laufzeit, ob 'user_id' existiert, und schreibt/liest entsprechend.
 // ESM: "type": "module"
 
 import { Pool } from "pg";
@@ -17,18 +18,22 @@ function pool() {
   return _pool;
 }
 
+// Merker, ob Legacy-Spalte 'user_id' existiert (und wir sie bedienen müssen)
+let HAS_USER_ID_COL = false;
+
 /**
- * Schema-Setup (idempotent) + sanfte Migration:
- * - Tabelle wins anlegen (falls fehlt)
- * - winner_user_id sicherstellen & aus user_id befüllen
- * - NOT NULL auf user_id entfernen (Legacy)
- * - sinnvolle Indizes setzen
+ * Schema-Setup (idempotent, ohne Primärschlüssel zu verändern):
+ * - Tabelle wins anlegen, falls sie fehlt
+ * - fehlende Spalten ergänzen
+ * - winner_user_id aus user_id füllen (falls vorhanden & leer)
+ * - Indizes setzen
+ * - HAS_USER_ID_COL bestimmen (steuert Lese-/Schreibpfad)
  */
 export async function ensureSchema() {
+  // 1) Grundgerüst & Spalten
   const sql = `
   BEGIN;
 
-  -- Basis
   CREATE TABLE IF NOT EXISTS wins (
     guild_id TEXT NOT NULL,
     item_slug TEXT NOT NULL,
@@ -40,7 +45,6 @@ export async function ensureSchema() {
     win_count INT DEFAULT 1
   );
 
-  -- fehlende Spalten ergänzen
   ALTER TABLE wins ADD COLUMN IF NOT EXISTS guild_id TEXT;
   ALTER TABLE wins ADD COLUMN IF NOT EXISTS item_slug TEXT;
   ALTER TABLE wins ADD COLUMN IF NOT EXISTS item_name_first TEXT;
@@ -50,41 +54,20 @@ export async function ensureSchema() {
   ALTER TABLE wins ADD COLUMN IF NOT EXISTS roll_value INT;
   ALTER TABLE wins ADD COLUMN IF NOT EXISTS win_count INT DEFAULT 1;
 
-  -- Migration: user_id -> winner_user_id (falls altes Schema existiert)
+  -- winner_user_id aus user_id befüllen, wenn alt vorhanden
   DO $$
-  DECLARE
-    has_user_id BOOLEAN;
-    has_winner  BOOLEAN;
   BEGIN
-    SELECT EXISTS (
+    IF EXISTS (
       SELECT 1 FROM information_schema.columns
        WHERE table_name = 'wins' AND column_name = 'user_id'
-    ) INTO has_user_id;
-
-    SELECT EXISTS (
-      SELECT 1 FROM information_schema.columns
-       WHERE table_name = 'wins' AND column_name = 'winner_user_id'
-    ) INTO has_winner;
-
-    -- Falls es user_id gibt, winner_user_id aber leer ist → befüllen
-    IF has_user_id THEN
-      EXECUTE 'UPDATE wins SET winner_user_id = COALESCE(winner_user_id, user_id) WHERE winner_user_id IS NULL';
-      -- user_id darf nicht mehr NOT NULL erzwingen (sonst schlagen künftige Inserts fehl)
-      BEGIN
-        EXECUTE 'ALTER TABLE wins ALTER COLUMN user_id DROP NOT NULL';
-      EXCEPTION WHEN undefined_column THEN
-        -- ignorieren
-        NULL;
-      END;
-    END IF;
-
-    -- winner_user_id muss NOT NULL sein
-    IF has_winner THEN
-      EXECUTE 'ALTER TABLE wins ALTER COLUMN winner_user_id SET NOT NULL';
+    ) THEN
+      UPDATE wins
+         SET winner_user_id = COALESCE(winner_user_id, user_id)
+       WHERE winner_user_id IS NULL;
     END IF;
   END$$;
 
-  -- Indizes
+  -- Indizes (nur helfende Indizes, keinen PK anfassen)
   CREATE INDEX IF NOT EXISTS wins_guild_time_idx ON wins (guild_id, rolled_at);
   CREATE INDEX IF NOT EXISTS wins_guild_item_idx ON wins (guild_id, item_slug);
   CREATE UNIQUE INDEX IF NOT EXISTS wins_unique_idx ON wins (guild_id, item_slug, winner_user_id);
@@ -92,6 +75,15 @@ export async function ensureSchema() {
   COMMIT;
   `;
   await pool().query(sql);
+
+  // 2) Schema-Feature-Check: gibt es 'user_id'?
+  const { rows } = await pool().query(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'wins' AND column_name = 'user_id'
+     ) AS has_user_id`
+  );
+  HAS_USER_ID_COL = !!rows?.[0]?.has_user_id;
 }
 
 // Utils
@@ -120,22 +112,41 @@ export async function insertWin({
   }
   const r = normalizeReason(reason);
   const rv = toInt(rollValue);
+  const inc = Math.max(1, toInt(incrementBy, 1));
 
-  const sql = `
-    INSERT INTO wins (guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, win_count)
-    VALUES ($1, $2, $3, $4, $5, $6, GREATEST($7, 1))
-    ON CONFLICT (guild_id, item_slug, winner_user_id)
-    DO UPDATE SET
-      win_count  = wins.win_count + GREATEST(EXCLUDED.win_count, 1),
-      reason     = COALESCE(EXCLUDED.reason, wins.reason),
-      roll_value = COALESCE(EXCLUDED.roll_value, wins.roll_value),
-      rolled_at  = NOW(),
-      item_name_first = EXCLUDED.item_name_first
-    RETURNING guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, win_count, rolled_at;
-  `;
-  const vals = [guildId, itemSlug, itemNameFirst, winnerUserId, r, rv, toInt(incrementBy, 1)];
-  const { rows } = await pool().query(sql, vals);
-  return rows[0];
+  if (HAS_USER_ID_COL) {
+    // Legacy-Pfad: auch in user_id schreiben, Konflikt auf (guild_id, item_slug, user_id)
+    const sql = `
+      INSERT INTO wins (guild_id, item_slug, item_name_first, winner_user_id, user_id, reason, roll_value, win_count)
+      VALUES ($1, $2, $3, $4, $4, $5, $6, $7)
+      ON CONFLICT (guild_id, item_slug, user_id)
+      DO UPDATE SET
+        win_count  = wins.win_count + GREATEST(EXCLUDED.win_count, 1),
+        reason     = COALESCE(EXCLUDED.reason, wins.reason),
+        roll_value = COALESCE(EXCLUDED.roll_value, wins.roll_value),
+        rolled_at  = NOW(),
+        item_name_first = EXCLUDED.item_name_first
+      RETURNING guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, win_count, rolled_at;
+    `;
+    const { rows } = await pool().query(sql, [guildId, itemSlug, itemNameFirst, winnerUserId, r, rv, inc]);
+    return rows[0];
+  } else {
+    // Neues Schema: Konflikt auf (guild_id, item_slug, winner_user_id)
+    const sql = `
+      INSERT INTO wins (guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, win_count)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (guild_id, item_slug, winner_user_id)
+      DO UPDATE SET
+        win_count  = wins.win_count + GREATEST(EXCLUDED.win_count, 1),
+        reason     = COALESCE(EXCLUDED.reason, wins.reason),
+        roll_value = COALESCE(EXCLUDED.roll_value, wins.roll_value),
+        rolled_at  = NOW(),
+        item_name_first = EXCLUDED.item_name_first
+      RETURNING guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, win_count, rolled_at;
+    `;
+    const { rows } = await pool().query(sql, [guildId, itemSlug, itemNameFirst, winnerUserId, r, rv, inc]);
+    return rows[0];
+  }
 }
 
 export async function incrementWin({ guildId, itemSlug, winnerUserId, step = 1 }) {
@@ -146,10 +157,12 @@ export async function incrementWin({ guildId, itemSlug, winnerUserId, step = 1 }
     UPDATE wins
        SET win_count = win_count + GREATEST($4, 1),
            rolled_at = NOW()
-     WHERE guild_id = $1 AND item_slug = $2 AND winner_user_id = $3
+     WHERE guild_id = $1 AND item_slug = $2 AND (winner_user_id = $3 OR (SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns WHERE table_name = 'wins' AND column_name = 'user_id'
+          )) AND user_id = $3)
      RETURNING guild_id, item_slug, winner_user_id, win_count, rolled_at;
   `;
-  const { rows } = await pool().query(sql, [guildId, itemSlug, winnerUserId, toInt(step, 1)]);
+  const { rows } = await pool().query(sql, [guildId, itemSlug, winnerUserId, Math.max(1, toInt(step, 1))]);
   return rows[0] ?? null;
 }
 
@@ -161,10 +174,12 @@ export async function decrementWin({ guildId, itemSlug, winnerUserId, step = 1 }
     UPDATE wins
        SET win_count = GREATEST(win_count - GREATEST($4, 1), 0),
            rolled_at = NOW()
-     WHERE guild_id = $1 AND item_slug = $2 AND winner_user_id = $3
+     WHERE guild_id = $1 AND item_slug = $2 AND (winner_user_id = $3 OR (SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns WHERE table_name = 'wins' AND column_name = 'user_id'
+          )) AND user_id = $3)
      RETURNING guild_id, item_slug, winner_user_id, win_count, rolled_at;
   `;
-  const { rows } = await pool().query(sql, [guildId, itemSlug, winnerUserId, toInt(step, 1)]);
+  const { rows } = await pool().query(sql, [guildId, itemSlug, winnerUserId, Math.max(1, toInt(step, 1))]);
   return rows[0] ?? null;
 }
 
@@ -200,14 +215,25 @@ export async function getDistinctItemsFromWins({ guildId, sinceHours = 48 }) {
 
 export async function getUserWinsForItem({ guildId, itemSlug }) {
   if (!guildId || !itemSlug) throw new Error("getUserWinsForItem: guildId, itemSlug erforderlich.");
-  const sql = `
-    SELECT winner_user_id, win_count
-      FROM wins
-     WHERE guild_id = $1 AND item_slug = $2;
-  `;
+
+  let sql;
+  if (HAS_USER_ID_COL) {
+    // Legacy: user_id auswerten
+    sql = `
+      SELECT user_id AS id, win_count
+        FROM wins
+       WHERE guild_id = $1 AND item_slug = $2;
+    `;
+  } else {
+    sql = `
+      SELECT winner_user_id AS id, win_count
+        FROM wins
+       WHERE guild_id = $1 AND item_slug = $2;
+    `;
+  }
   const { rows } = await pool().query(sql, [guildId, itemSlug]);
   const map = new Map();
-  for (const r of rows) map.set(r.winner_user_id, toInt(r.win_count, 0));
+  for (const r of rows) map.set(r.id, toInt(r.win_count, 0));
   return map;
 }
 
