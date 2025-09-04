@@ -1,6 +1,6 @@
 // commands/roll.mjs
 // Zeigt IMMER ein Dropdown mit allen Items (48h) und triggert roll-select per custom_id.
-// Gleiche Guild-ID/Query-Logik wie vote-show.mjs.
+// Gleiche Guild-ID/Query-Logik und DB-Aufrufschema wie vote-show.mjs (destructure { rows }).
 
 import { hasModPerm } from "../services/permissions.mjs";
 import crypto from "node:crypto";
@@ -21,7 +21,6 @@ export async function run(ctx) {
     // exakt wie in vote-show.mjs
     const guildId = typeof ctx.guildId === "function" ? ctx.guildId() : ctx.guildId;
 
-    // selbes 48h-Fenster & Namensspalte wie vote-show.mjs (item_name_first)
     const q = `
       SELECT
         item_name_first AS name,
@@ -34,7 +33,7 @@ export async function run(ctx) {
       ORDER BY name
       LIMIT 25
     `;
-    const rows = await db.query(q, [guildId]);
+    const { rows } = await db.query(q, [guildId]);
 
     if (!rows || rows.length === 0) {
       return ctx.reply("ℹ️ Keine qualifizierten Items in den letzten 48h.", { ephemeral: true });
@@ -61,7 +60,6 @@ export async function run(ctx) {
       ],
     };
 
-    // öffentliche Antwort für Transparenz bleibt gewollt
     return ctx.reply(
       {
         content: "Wähle ein Item für den Roll:",
