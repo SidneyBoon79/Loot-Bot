@@ -18,16 +18,17 @@ function pool() {
 }
 
 /**
- * Schema-Setup (idempotent, ohne erneute PK-Erzwingung).
+ * Schema-Setup (idempotent) + sanfte Migration:
  * - Tabelle wins anlegen (falls fehlt)
- * - fehlende Spalten ergänzen
- * - Legacy user_id -> winner_user_id migrieren (falls vorhanden)
- * - sinnvolle Indizes setzen (inkl. UNIQUE über (guild_id, item_slug, winner_user_id))
+ * - winner_user_id sicherstellen & aus user_id befüllen
+ * - NOT NULL auf user_id entfernen (Legacy)
+ * - sinnvolle Indizes setzen
  */
 export async function ensureSchema() {
   const sql = `
   BEGIN;
 
+  -- Basis
   CREATE TABLE IF NOT EXISTS wins (
     guild_id TEXT NOT NULL,
     item_slug TEXT NOT NULL,
@@ -49,14 +50,37 @@ export async function ensureSchema() {
   ALTER TABLE wins ADD COLUMN IF NOT EXISTS roll_value INT;
   ALTER TABLE wins ADD COLUMN IF NOT EXISTS win_count INT DEFAULT 1;
 
-  -- Legacy: user_id -> winner_user_id
+  -- Migration: user_id -> winner_user_id (falls altes Schema existiert)
   DO $$
+  DECLARE
+    has_user_id BOOLEAN;
+    has_winner  BOOLEAN;
   BEGIN
-    IF EXISTS (
+    SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
        WHERE table_name = 'wins' AND column_name = 'user_id'
-    ) THEN
-      EXECUTE 'UPDATE wins SET winner_user_id = COALESCE(winner_user_id, user_id)';
+    ) INTO has_user_id;
+
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_name = 'wins' AND column_name = 'winner_user_id'
+    ) INTO has_winner;
+
+    -- Falls es user_id gibt, winner_user_id aber leer ist → befüllen
+    IF has_user_id THEN
+      EXECUTE 'UPDATE wins SET winner_user_id = COALESCE(winner_user_id, user_id) WHERE winner_user_id IS NULL';
+      -- user_id darf nicht mehr NOT NULL erzwingen (sonst schlagen künftige Inserts fehl)
+      BEGIN
+        EXECUTE 'ALTER TABLE wins ALTER COLUMN user_id DROP NOT NULL';
+      EXCEPTION WHEN undefined_column THEN
+        -- ignorieren
+        NULL;
+      END;
+    END IF;
+
+    -- winner_user_id muss NOT NULL sein
+    IF has_winner THEN
+      EXECUTE 'ALTER TABLE wins ALTER COLUMN winner_user_id SET NOT NULL';
     END IF;
   END$$;
 
@@ -97,7 +121,6 @@ export async function insertWin({
   const r = normalizeReason(reason);
   const rv = toInt(rollValue);
 
-  // WICHTIG: ON CONFLICT über die SPALTEN, nicht über einen Index-Namen
   const sql = `
     INSERT INTO wins (guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, win_count)
     VALUES ($1, $2, $3, $4, $5, $6, GREATEST($7, 1))
