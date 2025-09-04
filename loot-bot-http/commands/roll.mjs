@@ -1,9 +1,8 @@
 // commands/roll.mjs
-// Zeigt IMMER ein Dropdown mit allen Items (48h) und triggert roll-select per custom_id.
-// Gleiche Guild-ID/Query-Logik und DB-Aufrufschema wie vote-show.mjs (destructure { rows }).
+// Dropdown mit Items (48h) -> Component "roll-select" (EXAKT, ohne UUID!)
+// DB-Pattern & Guild-ID analog vote-show.mjs
 
 import { hasModPerm } from "../services/permissions.mjs";
-import crypto from "node:crypto";
 
 function toLabel(s) {
   return String(s || "").slice(0, 100);
@@ -13,12 +12,10 @@ export async function run(ctx) {
   try {
     const db = ctx.db;
     if (!db) return ctx.reply("❌ Datenbank nicht verfügbar.", { ephemeral: true });
-
     if (!hasModPerm(ctx)) {
       return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
     }
 
-    // exakt wie in vote-show.mjs
     const guildId = typeof ctx.guildId === "function" ? ctx.guildId() : ctx.guildId;
 
     const q = `
@@ -45,8 +42,8 @@ export async function run(ctx) {
       description: `${r.c} Vote(s) · letzte 48h`,
     }));
 
-    // >>> Prefix auf 'roll-select' (mit Bindestrich)
-    const customId = `roll-select:${crypto.randomUUID()}`;
+    // Wichtig: EXAKTE ID, kein Suffix/UUID
+    const customId = "roll-select";
 
     const row = {
       type: 1, // ACTION_ROW
@@ -63,10 +60,7 @@ export async function run(ctx) {
     };
 
     return ctx.reply(
-      {
-        content: "Wähle ein Item für den Roll:",
-        components: [row],
-      },
+      { content: "Wähle ein Item für den Roll:", components: [row] },
       { ephemeral: false }
     );
   } catch (e) {
