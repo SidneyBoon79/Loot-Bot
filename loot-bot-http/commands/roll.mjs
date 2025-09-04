@@ -1,61 +1,77 @@
 // commands/roll.mjs
-// Roll für ein einzelnes Item (nur Mods/Admins)
+import { hasModPerm } from "../services/permissions.mjs";
+import { query } from "../services/db.mjs"; // erwartet: query(sql, params) -> rows[]
+import crypto from "node:crypto";
 
-export const command = {
+/**
+ * /roll
+ * - Zeigt IMMER ein Dropdown mit allen Items, die in den letzten 48h Votes haben.
+ * - Die eigentliche Auslosung passiert in interactions/components/roll-select.mjs
+ */
+export default {
   name: "roll",
-  description: "Rollt ein einzelnes Item aus (nur für Mods/Admins)"
+  description: "Loot-Roll für ein Item (Dropdown-Auswahl)",
+  options: [],
+  type: 1, // CHAT_INPUT
+  dm_permission: false,
+  default_member_permissions: null,
+
+  run: async (ctx) => {
+    // 1) Permissions
+    if (!hasModPerm(ctx)) {
+      return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
+    }
+
+    const guildId = ctx.guildId;
+
+    // 2) Items der letzten 48h mit mindestens 1 Vote sammeln
+    const items = await query(
+      `
+      SELECT
+        v.item_slug,
+        MIN(v.item_name_first) AS item_name,
+        COUNT(*)::int AS votes
+      FROM votes v
+      WHERE v.guild_id = $1
+        AND v.created_at > NOW() - INTERVAL '48 hours'
+      GROUP BY v.item_slug
+      ORDER BY votes DESC, item_slug ASC
+      LIMIT 25
+      `,
+      [guildId]
+    );
+
+    if (!items?.length) {
+      return ctx.reply("ℹ️ Keine qualifizierten Items in den letzten 48h.", { ephemeral: true });
+    }
+
+    // 3) Dropdown bauen
+    const customId = `roll:select:${crypto.randomUUID()}`; // unique für diese Interaktion
+
+    const options = items.map((it) => ({
+      label: it.item_name?.slice(0, 100) || it.item_slug.slice(0, 100),
+      value: it.item_slug,
+      description: `${it.votes} Vote(s) · letzte 48h`,
+    }));
+
+    return ctx.reply({
+      content: "Wähle ein Item für den Roll:",
+      components: [
+        {
+          type: 1, // ACTION_ROW
+          components: [
+            {
+              type: 3, // STRING_SELECT
+              custom_id: customId, // wird vom Router nach interactions/components/roll-select.mjs geroutet
+              placeholder: "Item wählen…",
+              min_values: 1,
+              max_values: 1,
+              options,
+            },
+          ],
+        },
+      ],
+      ephemeral: false, // öffentlich für Transparenz
+    });
+  },
 };
-
-export async function run(ctx) {
-  if (!ctx.member?.permissions?.includes("MANAGE_GUILD")) {
-    return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
-  }
-
-  // Items sammeln, die Votes haben & nicht gerollt sind
-  const res = await ctx.db.query(
-    `SELECT i.item_slug, i.item_name_first,
-            array_agg(json_build_object(
-              'user_id', v.user_id,
-              'type', v.type
-            )) AS votes
-       FROM items i
-       JOIN votes v
-         ON i.guild_id = v.guild_id
-        AND i.item_slug = v.item_slug
-      WHERE i.guild_id = $1
-        AND i.rolled_at IS NULL
-      GROUP BY i.item_slug, i.item_name_first
-      ORDER BY i.item_name_first ASC`,
-    [ctx.guildId]
-  );
-
-  if (res.rowCount === 0) {
-    return ctx.reply("Keine offenen Items zum Rollen.", { ephemeral: true });
-  }
-
-  // Dropdown für Item-Auswahl bauen
-  const options = res.rows.map(r => ({
-    label: r.item_name_first,
-    value: r.item_slug
-  }));
-
-  return ctx.reply({
-    content: "Wähle ein Item zum Rollen:",
-    components: [
-      {
-        type: 1,
-        components: [
-          {
-            type: 3,
-            custom_id: "roll:select",
-            placeholder: "Item auswählen…",
-            min_values: 1,
-            max_values: 1,
-            options
-          }
-        ]
-      }
-    ],
-    ephemeral: true
-  });
-}
