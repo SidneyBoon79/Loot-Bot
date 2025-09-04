@@ -1,123 +1,162 @@
-// server/interactionRouter.mjs — FINAL
+// server/interactionRouter.mjs
+// Discord Interaction Router (ESM) – minimal, stabil, mit ctx.reply shim.
+// Keine Public-Key-Verify hier, das lief bei euch bereits extern/Proxy.
+// ESM: "type": "module"
 
-// Commands
-import * as vote from "../commands/vote.mjs";
-import * as voteInfo from "../commands/vote-info.mjs";
-import * as voteClear from "../commands/vote-clear.mjs";
-import * as voteRemove from "../commands/vote-remove.mjs";
-import * as voteShow from "../commands/vote-show.mjs";
-import * as winner from "../commands/winner.mjs";
-import * as roll from "../commands/roll.mjs";
-import * as rollAll from "../commands/roll-all.mjs";
-import * as reroll from "../commands/reroll.mjs";
-import * as reducew from "../commands/reducew.mjs";
-
-// Interactions
-import { handleVoteItemAutocomplete } from "../interactions/autocomplete/vote-item.mjs";
-import { handleVoteReason } from "../interactions/components/vote-reason.mjs";
-import { handleVoteRemove } from "../interactions/components/vote-remove.mjs";
-import * as rerollSelect from "../interactions/components/reroll-select.mjs";
-import * as rollSelect from "../interactions/components/roll-select.mjs";
-
-// ---- Helpers ---------------------------------------------------------------
-
-function getVal(maybeFn) {
-  try { return typeof maybeFn === "function" ? maybeFn() : maybeFn; }
-  catch { return undefined; }
-}
-
-function buildOptsAPI(interaction) {
-  const opts = interaction?.data?.options || [];
-  return {
-    getString:  (name) => opts.find(o => o?.name === name)?.value ?? null,
-    getInteger: (name) => opts.find(o => o?.name === name)?.value ?? null,
-    getBoolean: (name) => opts.find(o => o?.name === name)?.value ?? null,
+function buildReply(res) {
+  // ctx.reply({ content, embeds?, components?, ephemeral? })
+  return (data = {}) => {
+    const { ephemeral, ...rest } = data || {};
+    const flags = ephemeral ? 1 << 6 : 0; // 64
+    return res.status(200).json({
+      type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
+      data: { flags, ...rest },
+    });
   };
 }
 
-// ---- Router ----------------------------------------------------------------
-
-export async function routeInteraction(ctx) {
-  const type = ctx.type?.();
-
-  // --- Application Commands (type 2) ---
-  if (type === 2) {
-    const name = ctx.commandName?.();
-    const baseCtx = {
-      interaction: ctx.interaction,
-      reply: ctx.reply,
-      followUp: ctx.followUp,
-      showModal: ctx.showModal,
-      guildId: getVal(ctx.guildId),
-      userId:  getVal(ctx.userId),
-      member:  getVal(ctx.member),
-      db: ctx.db,
-      opts: buildOptsAPI(ctx.interaction),
-    };
-
-    try {
-      switch (name) {
-        case "vote":        return await vote.run(baseCtx);
-        case "vote-info":   return await voteInfo.run(baseCtx);
-        case "vote-clear":  return await voteClear.run(baseCtx);
-        case "vote-remove": return await voteRemove.run(baseCtx);
-        case "vote-show":   return await voteShow.run(baseCtx);
-        case "winner":      return await winner.run(baseCtx);
-        case "roll":        return await roll.run(baseCtx);
-        case "roll-all":    return await rollAll.run(baseCtx);
-        case "reroll":      return await reroll.run(baseCtx);
-        case "reducew":     return await reducew.run(baseCtx);
-        default:
-          return ctx.reply(`Befehl **/${name}** ist noch nicht verdrahtet.`, { ephemeral: true });
-      }
-    } catch (e) {
-      console.error(`Fehler in Command ${name}:`, e);
-      return ctx.reply("❌ Da ging was schief.", { ephemeral: true });
+function extractOptionsMap(optionsArray) {
+  const obj = {};
+  if (!Array.isArray(optionsArray)) return obj;
+  for (const opt of optionsArray) {
+    if (opt?.name && Object.prototype.hasOwnProperty.call(opt, "value")) {
+      obj[opt.name] = opt.value;
+    }
+    // Subcommands / nested
+    if (opt?.options?.length) {
+      Object.assign(obj, extractOptionsMap(opt.options));
     }
   }
-
-  // --- Autocomplete (type 4) ---
-  if (type === 4) {
-    try {
-      return await handleVoteItemAutocomplete(ctx);
-    } catch (e) {
-      console.error("Autocomplete error:", e);
-      return ctx.respond([]); // leere Liste statt Fehler
-    }
-  }
-
-  // --- Components (type 3) ---
-  if (type === 3) {
-    const customId = ctx.customId?.() || ctx.interaction?.data?.custom_id;
-    const baseCtx = {
-      interaction: ctx.interaction,
-      reply: ctx.reply,
-      followUp: ctx.followUp,
-      update: ctx.update,
-      guildId: getVal(ctx.guildId),
-      userId:  getVal(ctx.userId),
-      member:  getVal(ctx.member),
-      db: ctx.db,
-      customId: () => customId,
-    };
-
-    try {
-      if (customId?.startsWith("reroll-select")) return await (rerollSelect.run?.(baseCtx));
-      if (customId?.startsWith("roll-select"))   return await (rollSelect.run?.(baseCtx));
-      if (customId?.startsWith("vote:grund:"))   return await handleVoteReason(baseCtx);
-      if (customId === "vote:remove")            return await handleVoteRemove(baseCtx);
-
-      return ctx.reply("❌ Unbekanntes Component.", { ephemeral: true });
-    } catch (e) {
-      console.error("Component error:", e);
-      return ctx.reply("❌ Fehler im Component.", { ephemeral: true });
-    }
-  }
-
-  // --- Modal Submit (type 5) ---
-  if (type === 5) {
-    return ctx.reply("❌ Unbekannte Modal-Aktion.", { ephemeral: true });
-  }
-
-  return ctx.reply("❌ Unbekannte Interaktion.", { ephemeral: true });
+  return obj;
 }
+
+async function handleCommand(interaction, req, res) {
+  const name = interaction?.data?.name;
+  if (!name) return res.status(200).json({ type: 4, data: { content: "❌ Unbekannter Command." } });
+
+  // Modul nach konventionellem Dateinamen laden: commands/<name>.mjs
+  // Beispiel: vote-show -> commands/vote-show.mjs
+  const path = `../commands/${name}.mjs`;
+
+  let mod;
+  try {
+    mod = await import(path);
+  } catch (e) {
+    console.error("[router] Import-Fehler Command:", name, e);
+    return res.status(200).json({ type: 4, data: { content: `❌ Command '${name}' nicht gefunden.` } });
+  }
+
+  // Verschiedene Export-Stile tolerieren
+  const handler =
+    mod?.[name]?.run ||
+    mod?.run ||
+    (typeof mod?.default === "object" && mod.default.run) ||
+    (typeof mod?.default === "function" ? mod.default : null);
+
+  if (typeof handler !== "function") {
+    console.error("[router] Kein ausführbarer Handler für", name, "in", path);
+    return res.status(200).json({ type: 4, data: { content: `❌ Handler für '${name}' fehlt.` } });
+  }
+
+  const options = extractOptionsMap(interaction?.data?.options);
+  const ctx = {
+    req,
+    res,
+    interaction,
+    reply: buildReply(res),
+    guildId: interaction?.guild_id,
+    channelId: interaction?.channel_id,
+    userId: interaction?.member?.user?.id || interaction?.user?.id,
+    options,
+  };
+
+  try {
+    return await handler(ctx);
+  } catch (err) {
+    console.error("Fehler in Command", name + ":", err);
+    return res.status(200).json({ type: 4, data: { content: "❌ Da ging was schief." } });
+  }
+}
+
+async function handleComponent(interaction, req, res) {
+  // Buttons / Selects
+  const cid = interaction?.data?.custom_id;
+  if (!cid) return res.status(200).json({ type: 4, data: { content: "❌ Unbekannte Komponente." } });
+
+  // Mapping der bekannten Components → Datei
+  const map = {
+    "roll-select": "../interactions/components/roll-select.mjs",
+    "reroll-select": "../interactions/components/reroll-select.mjs",
+    "reasonSelect": "../interactions/components/reasonSelect.mjs",
+  };
+
+  const path = map[cid];
+  if (!path) {
+    console.warn("[router] Unbekannter custom_id:", cid);
+    return res.status(200).json({ type: 4, data: { content: "❌ Fehler im Component." } });
+  }
+
+  let mod;
+  try {
+    mod = await import(path);
+  } catch (e) {
+    console.error("[router] Import-Fehler Component:", cid, e);
+    return res.status(200).json({ type: 4, data: { content: "❌ Fehler im Component." } });
+  }
+
+  // Export-Toleranz
+  const handler =
+    mod?.[cid]?.run ||
+    mod?.run ||
+    (typeof mod?.default === "object" && mod.default.run) ||
+    (typeof mod?.default === "function" ? mod.default : null);
+
+  if (typeof handler !== "function") {
+    console.error("[router] Kein ausführbarer Component-Handler für", cid, "in", path);
+    return res.status(200).json({ type: 4, data: { content: "❌ Fehler im Component." } });
+  }
+
+  const ctx = {
+    req,
+    res,
+    interaction,
+    reply: buildReply(res),
+    guildId: interaction?.guild_id,
+    channelId: interaction?.channel_id,
+    userId: interaction?.member?.user?.id || interaction?.user?.id,
+    // Für Selects/Buttons: values und custom_id zugänglich machen
+    values: interaction?.data?.values || [],
+    customId: cid,
+  };
+
+  try {
+    return await handler(ctx);
+  } catch (err) {
+    console.error("Component error:", err);
+    return res.status(200).json({ type: 4, data: { content: "❌ Fehler im Component." } });
+  }
+}
+
+// Öffentliche Router-Funktion
+export async function routeInteraction(req, res) {
+  const interaction = req?.body;
+  const type = interaction?.type;
+
+  // 1 = PING, 2 = APPLICATION_COMMAND, 3 = MESSAGE_COMPONENT, 5 = MODAL_SUBMIT, 4 = AUTOCOMPLETE
+  if (type === 1) {
+    return res.status(200).json({ type: 1 }); // PONG
+  }
+
+  if (type === 2) { // Slash-Command
+    return handleCommand(interaction, req, res);
+  }
+
+  if (type === 3) { // Component (Buttons / Selects)
+    return handleComponent(interaction, req, res);
+  }
+
+  // Fallback
+  return res.status(200).json({ type: 4, data: { content: "❌ Unsupported interaction type." } });
+}
+
+export default { routeInteraction };
