@@ -45,7 +45,9 @@ export async function run(ctx) {
       description: `${r.c} Vote(s) · letzte 48h`,
     }));
 
-    const customId = `roll:select:${crypto.randomUUID()}`;
+    // >>> Prefix auf 'roll-select' (mit Bindestrich)
+    const customId = `roll-select:${crypto.randomUUID()}`;
+
     const row = {
       type: 1, // ACTION_ROW
       components: [
