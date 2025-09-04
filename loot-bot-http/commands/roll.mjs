@@ -36,13 +36,10 @@ async function getVotesForItem({ guildId, itemSlug, hours = 48 }) {
 const PRIO = { gear: 2, trait: 1, litho: 0 };
 
 function cmp(a, b) {
-  // 1) Grund-Priorität: Gear > Trait > Litho
   const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
   if (g !== 0) return g;
-  // 2) Weniger Wins zuerst (ASC)
   const w = (a.wins ?? 0) - (b.wins ?? 0);
   if (w !== 0) return w;
-  // 3) Höherer Wurf gewinnt (DESC)
   return (b.roll ?? 0) - (a.roll ?? 0);
 }
 
@@ -65,30 +62,24 @@ function formatRanking(cands, winner) {
   return lines.join("\n") + winLine;
 }
 
-// ---- Command Handler --------------------------------------------------------
-// Erwartet ctx mit: guildId, reply(text), options: { itemSlug, itemNameFirst }
-// Wenn kein itemSlug übergeben wurde, sollte dein Router roll-select öffnen (separat).
-export default async function handleRoll(ctx) {
+// ---- Command API ------------------------------------------------------------
+async function run(ctx) {
   const guildId = ctx.guildId || ctx.guild_id || ctx.guild?.id;
   const itemSlug = ctx.options?.itemSlug || ctx.itemSlug || ctx.values?.itemSlug;
   const itemNameFirst = ctx.options?.itemNameFirst || ctx.itemNameFirst || ctx.values?.itemNameFirst || itemSlug;
 
   if (!guildId) return ctx.reply?.({ content: "Kein Guild-Kontext.", ephemeral: true });
   if (!itemSlug) {
-    // Kein Item übergeben → UI-Komponente (roll-select) soll greifen
     return ctx.reply?.({ content: "Wähle ein Item im Dropdown (roll-select).", ephemeral: true });
   }
 
-  // 1) Votes der letzten 48h laden
   const votes = await getVotesForItem({ guildId, itemSlug, hours: 48 });
   if (!votes.length) {
     return ctx.reply?.({ content: `Keine Votes (48h) für **${itemNameFirst}**.`, ephemeral: true });
   }
 
-  // 2) Wins-Map laden (gesamt, itembezogen) für Fairness
   const winsMap = await getUserWinsForItem({ guildId, itemSlug });
 
-  // 3) Kandidaten rollen
   const candidates = votes.map(v => ({
     userId: v.userId,
     reason: v.reason === "gear" ? "gear" : v.reason === "trait" ? "trait" : "litho",
@@ -96,10 +87,8 @@ export default async function handleRoll(ctx) {
     roll: d100(),
   }));
 
-  // 4) Sortieren nach Fairness
   candidates.sort(cmp);
 
-  // 5) Gewinner persistieren
   const winner = candidates[0];
   const persisted = await insertWin({
     guildId,
@@ -110,10 +99,13 @@ export default async function handleRoll(ctx) {
     rollValue: winner.roll,
   });
 
-  // 6) Antwort bauen
   const replyText =
     `**🎲 Roll für:** ${itemNameFirst}\n` +
     formatRanking(candidates, { ...winner, newWinCount: persisted?.win_count ?? (winner.wins + 1) });
 
   return ctx.reply?.({ content: replyText });
 }
+
+// Export wie vom Router erwartet
+export const roll = { run };
+export default roll;
