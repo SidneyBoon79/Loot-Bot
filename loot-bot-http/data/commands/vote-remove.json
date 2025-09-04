@@ -1,0 +1,5 @@
+{
+  "name": "vote-remove",
+  "description": "Entfernt deine Stimme zu einem Item (letzte 48h).",
+  "type": 1
+}
