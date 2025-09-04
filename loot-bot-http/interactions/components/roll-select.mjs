@@ -1,6 +1,6 @@
 // interactions/components/roll-select.mjs
-// Nutzt dieselben Fallback-Prinzipien für den Item-Namen und für wins-Join wie besprochen.
-// Sudden-Death bei vollständigem Gleichstand bleibt erhalten.
+// Gleiche Guild-ID-Ermittlung & 48h-Fenster wie vote-show.mjs.
+// Sudden-Death bei vollständigem Gleichstand; Speicherung in wins.
 
 import { hasModPerm } from "../../services/permissions.mjs";
 
@@ -13,13 +13,8 @@ function cmpDisplay(a, b) {
   if (w !== 0) return w;
   return (b.roll ?? 0) - (a.roll ?? 0);
 }
-
-function rollInt(max) {
-  return 1 + Math.floor(Math.random() * max);
-}
-function reasonEmoji(r) {
-  return r === "gear" ? "⚔️" : r === "trait" ? "💠" : "📜";
-}
+function rollInt(max) { return 1 + Math.floor(Math.random() * max); }
+function reasonEmoji(r) { return r === "gear" ? "⚔️" : r === "trait" ? "💠" : "📜"; }
 function formatLine(entry, rankIdx) {
   const medal = rankIdx === 0 ? "🥇" : rankIdx === 1 ? "🥈" : rankIdx === 2 ? "🥉" : "-";
   const prettyReason = entry.reason[0].toUpperCase() + entry.reason.slice(1);
@@ -35,58 +30,34 @@ export default {
         return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
       }
 
-      const guildId =
-        ctx?.guildId ??
-        ctx?.guild_id ??
-        ctx?.interaction?.guild_id ??
-        ctx?.guild?.id ??
-        null;
+      const db = ctx.db;
+      if (!db) return ctx.reply("❌ Datenbank nicht verfügbar.", { ephemeral: true });
+
+      // exakt wie in vote-show.mjs
+      const guildId = typeof ctx.guildId === "function" ? ctx.guildId() : ctx.guildId;
 
       const itemSlug = ctx.values?.[0];
-      if (!guildId || !itemSlug) {
+      if (!itemSlug) {
         return ctx.reply("⚠️ Ungültige Auswahl.", { ephemeral: true });
       }
 
-      // Item-Name mit Fallbacks bestimmen (item_name_first -> item_name -> slug)
-      let itemName = null;
-      const p = [String(guildId), itemSlug];
+      // Item-Name wie in vote-show: item_name_first
+      const nameRows = await db.query(
+        `
+        SELECT MIN(v.item_name_first) AS name
+        FROM votes v
+        WHERE v.guild_id = $1
+          AND v.item_slug = $2
+          AND v.created_at > NOW() - INTERVAL '48 hours'
+        `,
+        [guildId, itemSlug]
+      );
+      const itemName = nameRows?.[0]?.name || itemSlug;
 
-      try {
-        const r1 = await ctx.db.query(
-          `
-          SELECT MIN(v.item_name_first) AS item_name
-          FROM votes v
-          WHERE v.guild_id = $1
-            AND v.item_slug = $2
-            AND v.created_at > NOW() - INTERVAL '48 hours'
-          `,
-          p
-        );
-        itemName = r1?.[0]?.item_name;
-      } catch (_) {}
-
-      if (!itemName) {
-        try {
-          const r2 = await ctx.db.query(
-            `
-            SELECT MIN(v.item_name) AS item_name
-            FROM votes v
-            WHERE v.guild_id = $1
-              AND v.item_slug = $2
-              AND v.created_at > NOW() - INTERVAL '48 hours'
-            `,
-            p
-          );
-          itemName = r2?.[0]?.item_name;
-        } catch (_) {}
-      }
-
-      if (!itemName) itemName = itemSlug;
-
-      // Teilnehmer mit wins-Join; Fallback, falls wins noch nicht existiert
+      // Teilnehmer: pro User der neueste Grund in 48h; Wins der letzten 48h (falls Tabelle existiert)
       let participants;
       try {
-        participants = await ctx.db.query(
+        participants = await db.query(
           `
           WITH latest AS (
             SELECT DISTINCT ON (user_id)
@@ -105,19 +76,17 @@ export default {
               AND rolled_at > NOW() - INTERVAL '48 hours'
             GROUP BY winner_user_id
           )
-          SELECT
-            l.user_id,
-            l.reason,
-            COALESCE(w.wins, 0)::int AS wins
+          SELECT l.user_id, l.reason, COALESCE(w.wins, 0)::int AS wins
           FROM latest l
           LEFT JOIN wins48 w USING (user_id)
           ORDER BY l.user_id ASC
           `,
-          p
+          [guildId, itemSlug]
         );
       } catch (e) {
-        if (e && (e.code === "42P01" || String(e.message || "").includes("relation \"wins\""))) {
-          participants = await ctx.db.query(
+        // Fallback, falls wins noch nicht existiert
+        if (e && (e.code === "42P01" || String(e.message || "").includes('relation "wins"'))) {
+          participants = await db.query(
             `
             WITH latest AS (
               SELECT DISTINCT ON (user_id)
@@ -128,14 +97,11 @@ export default {
                 AND created_at > NOW() - INTERVAL '48 hours'
               ORDER BY user_id, created_at DESC
             )
-            SELECT
-              l.user_id,
-              l.reason,
-              0::int AS wins
+            SELECT l.user_id, l.reason, 0::int AS wins
             FROM latest l
             ORDER BY l.user_id ASC
             `,
-            p
+            [guildId, itemSlug]
           );
         } else {
           throw e;
@@ -146,11 +112,12 @@ export default {
         return ctx.reply(`ℹ️ Keine qualifizierten Teilnehmer für **${itemName}** in den letzten 48h.`, { ephemeral: false });
       }
 
-      // Würfeln, sortieren, Sudden-Death
+      // Würfeln + Sortierung
       let rolled = participants.map(p => ({ ...p, roll: rollInt(20) }));
       rolled.sort(cmpDisplay);
       const top = rolled.filter(e => cmpDisplay(e, rolled[0]) === 0);
 
+      // Sudden-Death bei komplettem Gleichstand
       const isFullTie = (group) => {
         if (group.length < 2) return false;
         const a = group[0];
@@ -176,11 +143,11 @@ export default {
         winner._tieBreak = true;
       }
 
-      // Gewinner speichern (non-blocking)
+      // Gewinner speichern (wins)
       let stored = false;
       let winnerWinCount = (winner.wins ?? 0) + 1;
       try {
-        const ins = await ctx.db.query(
+        const ins = await db.query(
           `
           WITH prev AS (
             SELECT COALESCE(MAX(win_count), 0)::int AS prev_count
@@ -194,7 +161,7 @@ export default {
           )
           SELECT win_count FROM ins
           `,
-          [String(guildId), itemSlug, itemName, winner.user_id, winner.reason, winner.roll]
+          [guildId, itemSlug, itemName, winner.user_id, winner.reason, winner.roll]
         );
         if (ins?.[0]?.win_count != null) {
           winnerWinCount = ins[0].win_count;
