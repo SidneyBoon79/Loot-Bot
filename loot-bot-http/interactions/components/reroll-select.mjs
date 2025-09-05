@@ -1,157 +1,168 @@
 // interactions/components/reroll-select.mjs
-// Re-Roll Flow (Components):
-// 1) "reroll:select"  -> zeigt Bestätigung (Ja/Nein)
-// 2) "reroll:confirm:<slug>" -> führt Re-Roll aus (Ranking + Win-Umbuchung)
-// 3) "reroll:cancel:<slug>"  -> bricht ab
+// Identisch zu roll-select: winners-Log (INSERT) + wins-Upsert (PK: guild_id, user_id)
+// Fairness (48h) aus winners. Anzeige mit 🥇/🥈/🥉, 🏆.
 
-const REASON_PRIORITY = { gear: 3, trait: 2, litho: 1 };
-const d100 = () => (Math.random() * 100 | 0) + 1;
+import { hasModPerm } from "../../services/permissions.mjs";
 
-function confirmButtons(slug) {
-  return {
-    type: 1,
-    components: [
-      { type: 2, style: 3, custom_id: `reroll:confirm:${slug}`, label: "Ja, neu auslosen" },
-      { type: 2, style: 4, custom_id: `reroll:cancel:${slug}`,  label: "Nein, abbrechen" }
-    ]
-  };
+export const id = "reroll-select";
+export const idStartsWith = "reroll-select";
+
+const PRIO = { gear: 2, trait: 1, litho: 0 };
+
+const norm  = (x) => String(x ?? "").trim().toLowerCase();
+const emoji = (r) => ({ gear:"🗡️", trait:"💠", litho:"📜" }[String(r||"").toLowerCase()] || "❔");
+const medal = (i) => (i===0?"🥇":i===1?"🥈":i===2?"🥉":"–");
+const d20   = () => Math.floor(Math.random()*20)+1;
+
+function cmp(a,b){
+  const g=(PRIO[b.reason]??0)-(PRIO[a.reason]??0); if(g) return g;
+  const w=(a.wins??0)-(b.wins??0); if(w) return w;
+  return (b.roll??0)-(a.roll??0);
+}
+function line(e,i){
+  const rTxt=(e.reason||"").toLowerCase();
+  const wTxt = typeof e.win_count_after==="number" ? ` (W${e.win_count_after})`
+             : typeof e.wins==="number" ? ` (W${e.wins})` : "";
+  const rRoll = typeof e.roll==="number" ? ` · ${e.roll}` : "";
+  return `${medal(i)} <@${e.user_id}> — ${emoji(rTxt)} ${rTxt}${rRoll}${wTxt}`;
 }
 
-export async function handleRerollSelect(ctx) {
-  const id = (typeof ctx.customId === "function" && ctx.customId()) || ctx.interaction?.data?.custom_id || "";
-  if (id !== "reroll:select") return;
+export async function run(ctx){
+  try{
+    if(!hasModPerm(ctx)) return ctx.reply("❌ Keine Berechtigung.", {ephemeral:true});
+    const db = ctx.db;
+    if(!db) return ctx.reply("❌ Datenbank nicht verfügbar.", {ephemeral:true});
 
-  const values = (typeof ctx.values === "function" && ctx.values()) || ctx.interaction?.data?.values || [];
-  const slug = Array.isArray(values) && values.length ? values[0] : null;
-  if (!slug) return ctx.update({ content: "Kein Item gewählt.", components: [] });
+    const guildId =
+      (typeof ctx.guildId==="function" ? ctx.guildId() : ctx.guildId) ??
+      ctx.guild_id ?? ctx.guild?.id ?? null;
+    if(!guildId) return ctx.reply("❌ Konnte die Guild-ID nicht ermitteln.", {ephemeral:true});
 
-  const ires = await ctx.db.query(
-    `SELECT item_name_first FROM items WHERE guild_id=$1 AND item_slug=$2`,
-    [ctx.guildId, slug]
-  );
-  const itemName = ires.rowCount ? ires.rows[0].item_name_first : slug;
+    const values = ctx?.values ?? ctx?.interaction?.data?.values ?? [];
+    const itemSlug = norm(values[0]);
+    if(!itemSlug) return ctx.reply("⚠️ Ungültige Auswahl.", {ephemeral:true});
 
-  return ctx.update({
-    content: `⚠️ **Re-Roll bestätigen**\nSoll **${itemName}** neu ausgelost werden? (Wins werden ggf. umgebucht)`,
-    components: [confirmButtons(slug)]
-  });
+    // Itemname (48h) aus votes
+    const { rows: nrows } = await db.query(`
+      SELECT MIN(item_name_first) AS name
+      FROM votes
+      WHERE guild_id = $1
+        AND item_slug = $2
+        AND created_at > NOW() - INTERVAL '48 hours'
+    `, [guildId, itemSlug]);
+    const itemName = nrows?.[0]?.name || itemSlug;
+
+    // Teilnehmer: neuester Grund (48h) + Wins (48h) aus winners
+    const { rows: participants } = await db.query(`
+      WITH latest AS (
+        SELECT DISTINCT ON (user_id)
+          user_id, LOWER(reason) AS reason, created_at
+        FROM votes
+        WHERE guild_id = $1
+          AND item_slug = $2
+          AND created_at > NOW() - INTERVAL '48 hours'
+        ORDER BY user_id, created_at DESC
+      ),
+      wins48 AS (
+        SELECT user_id, COUNT(*)::int AS wins
+        FROM winners
+        WHERE guild_id = $1
+          AND item_slug = $2
+          AND won_at > NOW() - INTERVAL '48 hours'
+        GROUP BY user_id
+      )
+      SELECT l.user_id, l.reason, COALESCE(w.wins,0) AS wins
+      FROM latest l
+      LEFT JOIN wins48 w USING (user_id)
+    `, [guildId, itemSlug]);
+
+    if(!participants?.length){
+      return ctx.reply(`ℹ️ Keine qualifizierten Teilnehmer für **${itemName}** in den letzten 48h.`, {ephemeral:false});
+    }
+
+    // Würfeln & sortieren
+    let rolled = participants.map(p => ({...p, roll: d20()})).sort(cmp);
+
+    // Sudden-Death bei komplettem Gleichstand
+    const top = rolled.filter(e => cmp(e, rolled[0])===0);
+    const equal = (a,b)=> (PRIO[a.reason]??0)===(PRIO[b.reason]??0) && (a.wins??0)===(b.wins??0) && (a.roll??0)===(b.roll??0);
+    let winner = top[0];
+    if(top.length>1 && top.every(x=>equal(x, top[0]))){
+      let pool = [...top];
+      for(let i=0;i<10;i++){
+        pool = pool.map(x=>({...x, roll:d20()})).sort(cmp);
+        const g = pool.filter(e=>cmp(e,pool[0])===0);
+        if(g.length===1){ winner = pool[0]; winner._tieBreak=true; break; }
+      }
+    }
+
+    // Persistenz: winners-Log + wins-Upsert (PK: guild_id, user_id)
+    let stored = false;
+    try{
+      await db.query("BEGIN");
+
+      await db.query(`
+        INSERT INTO winners (guild_id, item_slug, user_id, won_at, window_end_at)
+        VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '48 hours')
+      `, [guildId, itemSlug, winner.user_id]);
+
+      await db.query(`
+        INSERT INTO wins
+          (guild_id, user_id, win_count, updated_at, item_slug, item_name_first, winner_user_id, reason, rolled_at, roll_value)
+        VALUES
+          ($1,      $2,     1,         NOW(),      $3,        $4,              $2,            $5,     NOW(),    $6)
+        ON CONFLICT (guild_id, user_id)
+        DO UPDATE SET
+          win_count       = wins.win_count + 1,
+          updated_at      = NOW(),
+          rolled_at       = NOW(),
+          item_slug       = EXCLUDED.item_slug,
+          item_name_first = EXCLUDED.item_name_first,
+          winner_user_id  = EXCLUDED.winner_user_id,
+          reason          = EXCLUDED.reason,
+          roll_value      = EXCLUDED.roll_value
+      `, [guildId, winner.user_id, itemSlug, itemName, winner.reason, winner.roll]);
+
+      await db.query("COMMIT");
+      stored = true;
+    }catch(e){
+      try { await db.query("ROLLBACK"); } catch {}
+      console.error("[reroll-select persist]", e?.message || e);
+      stored = false;
+    }
+
+    // Gewinner-Wins nach Log neu zählen (48h)
+    let winnerWinCount = 1;
+    try{
+      const { rows: wcount } = await db.query(`
+        SELECT COUNT(*)::int AS c
+        FROM winners
+        WHERE guild_id = $1
+          AND item_slug = $2
+          AND user_id   = $3
+          AND won_at > NOW() - INTERVAL '48 hours'
+      `, [guildId, itemSlug, winner.user_id]);
+      winnerWinCount = wcount?.[0]?.c ?? 1;
+    }catch{}
+
+    const display = rolled
+      .map(e => ({
+        ...e,
+        win_count_after: e.user_id === winner.user_id ? winnerWinCount : e.wins
+      }))
+      .sort(cmp);
+
+    const header = `🎲 Reroll-Ergebnis für **${itemName}**${winner._tieBreak ? " (Tie-Break)" : ""}:`;
+    const lines  = display.map((e,i)=>line(e,i));
+    const rTxt   = (winner.reason||"").toLowerCase();
+    const footer = `\n\n🏆 Gewinner: <@${winner.user_id}> — ${emoji(rTxt)} ${rTxt} · Wurf ${winner.roll} · (W${winnerWinCount})` + (stored ? "" : "  ⚠️ (nicht gespeichert)");
+    const note   = winner._tieBreak ? `\n↪️ Tie-Break nur zwischen Gleichauf-Teilnehmern durchgeführt.` : "";
+
+    return ctx.reply(`${header}\n${lines.join("\n")}${footer}${note}`, {ephemeral:false});
+  }catch(e){
+    console.error("[components/reroll-select] error:", e);
+    return ctx.reply("⚠️ Unerwarteter Fehler beim Reroll.", {ephemeral:true});
+  }
 }
 
-async function computeNewWinner(ctx, slug) {
-  const vres = await ctx.db.query(
-    `SELECT v.user_id, v.type
-       FROM votes v
-      WHERE v.guild_id=$1 AND v.item_slug=$2
-        AND v.created_at > NOW() - INTERVAL '48 hours'`,
-    [ctx.guildId, slug]
-  );
-  if (vres.rowCount === 0) return { candidates: [], winner: null };
-
-  const candidates = [];
-  for (const row of vres.rows) {
-    const wres = await ctx.db.query(
-      `SELECT win_count FROM wins WHERE guild_id=$1 AND user_id=$2`,
-      [ctx.guildId, row.user_id]
-    );
-    const wins = wres.rowCount ? wres.rows[0].win_count : 0;
-    candidates.push({
-      user_id: row.user_id,
-      reason: row.type,
-      priority: REASON_PRIORITY[row.type] || 0,
-      wins,
-      roll: d100()
-    });
-  }
-
-  candidates.sort((a, b) => {
-    if (b.priority !== a.priority) return b.priority - a.priority;
-    if (a.wins !== b.wins) return a.wins - b.wins;
-    return b.roll - a.roll;
-  });
-
-  return { candidates, winner: candidates[0] || null };
-}
-
-export async function handleRerollConfirm(ctx) {
-  const id = (typeof ctx.customId === "function" && ctx.customId()) || ctx.interaction?.data?.custom_id || "";
-  if (!id.startsWith("reroll:confirm:")) return;
-  const slug = id.split(":").slice(2).join(":");
-
-  const ires = await ctx.db.query(
-    `SELECT item_name_first, rolled_by
-       FROM items
-      WHERE guild_id=$1 AND item_slug=$2`,
-    [ctx.guildId, slug]
-  );
-  if (ires.rowCount === 0) {
-    return ctx.update({ content: "Item nicht gefunden.", components: [] });
-  }
-  const { item_name_first: itemName, rolled_by: oldWinnerId } = ires.rows[0];
-
-  const { candidates, winner } = await computeNewWinner(ctx, slug);
-  if (!winner) {
-    return ctx.update({
-      content: `Keine gültigen Votes für **${itemName}** vorhanden.`,
-      components: []
-    });
-  }
-
-  const newWinnerId = winner.user_id;
-  const sameWinner = oldWinnerId && String(oldWinnerId) === String(newWinnerId);
-
-  if (!sameWinner && oldWinnerId) {
-    await ctx.db.query(
-      `INSERT INTO wins (guild_id, user_id, win_count, updated_at)
-       VALUES ($1, $2, 0, NOW())
-       ON CONFLICT (guild_id, user_id)
-       DO UPDATE SET win_count = GREATEST(wins.win_count - 1, 0),
-                     updated_at = NOW()`,
-      [ctx.guildId, oldWinnerId]
-    );
-  }
-
-  if (!sameWinner) {
-    await ctx.db.query(
-      `INSERT INTO wins (guild_id, user_id, win_count, updated_at)
-       VALUES ($1, $2, 1, NOW())
-       ON CONFLICT (guild_id, user_id)
-       DO UPDATE SET win_count = wins.win_count + 1,
-                     updated_at = NOW()`,
-      [ctx.guildId, newWinnerId]
-    );
-  }
-
-  await ctx.db.query(
-    `UPDATE items
-        SET rolled_at = NOW(),
-            rolled_by = $3
-      WHERE guild_id=$1 AND item_slug=$2`,
-    [ctx.guildId, slug, newWinnerId]
-  );
-
-  const lines = candidates.map((c, idx) => {
-    const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : "➖";
-    const reasonEmoji = c.reason === "gear" ? "⚔️" : c.reason === "trait" ? "💠" : "📜";
-    return `${medal} <@${c.user_id}> — ${c.roll} (${reasonEmoji}, Wins: ${c.wins})`;
-  });
-
-  const sameNote = sameWinner
-    ? "\nℹ️ Gewinner bleibt unverändert; Wins wurden nicht angepasst."
-    : "";
-
-  return ctx.update({
-    content:
-      `🔁 **Re-Roll** für **${itemName}**\n\n` +
-      `${lines.join("\n")}\n\n` +
-      `🏆 Neuer Gewinner: <@${newWinnerId}>` +
-      sameNote,
-    components: []
-  });
-}
-
-export async function handleRerollCancel(ctx) {
-  const id = (typeof ctx.customId === "function" && ctx.customId()) || ctx.interaction?.data?.custom_id || "";
-  if (!id.startsWith("reroll:cancel:")) return;
-
-  return ctx.update({ content: "Re-Roll abgebrochen.", components: [] });
-}
+export default { id, idStartsWith, run };
