@@ -1,14 +1,10 @@
 // interactions/components/reroll-select.mjs
-// Identisch zu roll-select: winners-Log (INSERT) + wins-Upsert (PK: guild_id, user_id)
-// Fairness (48h) aus winners. Anzeige mit 🥇/🥈/🥉, 🏆.
-
 import { hasModPerm } from "../../services/permissions.mjs";
 
 export const id = "reroll-select";
 export const idStartsWith = "reroll-select";
 
 const PRIO = { gear: 2, trait: 1, litho: 0 };
-
 const norm  = (x) => String(x ?? "").trim().toLowerCase();
 const emoji = (r) => ({ gear:"🗡️", trait:"💠", litho:"📜" }[String(r||"").toLowerCase()] || "❔");
 const medal = (i) => (i===0?"🥇":i===1?"🥈":i===2?"🥉":"–");
@@ -80,7 +76,7 @@ export async function run(ctx){
       return ctx.reply(`ℹ️ Keine qualifizierten Teilnehmer für **${itemName}** in den letzten 48h.`, {ephemeral:false});
     }
 
-    // Würfeln & sortieren
+    // Würfeln & sortieren (Prio bleibt!)
     let rolled = participants.map(p => ({...p, roll: d20()})).sort(cmp);
 
     // Sudden-Death bei komplettem Gleichstand
@@ -96,32 +92,74 @@ export async function run(ctx){
       }
     }
 
-    // Persistenz: winners-Log + wins-Upsert (PK: guild_id, user_id)
+    // Letzten Gewinner dieses Items (48h) ermitteln
+    const { rows: lastRows } = await db.query(`
+      SELECT user_id
+      FROM winners
+      WHERE guild_id = $1
+        AND item_slug = $2
+        AND won_at > NOW() - INTERVAL '48 hours'
+      ORDER BY won_at DESC
+      LIMIT 1
+    `, [guildId, itemSlug]);
+    const lastWinnerUserId = lastRows?.[0]?.user_id ?? null;
+    const sameWinner = lastWinnerUserId && String(lastWinnerUserId) === String(winner.user_id);
+
+    // Persistenz
     let stored = false;
     try{
       await db.query("BEGIN");
 
-      await db.query(`
-        INSERT INTO winners (guild_id, item_slug, user_id, won_at, window_end_at)
-        VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '48 hours')
-      `, [guildId, itemSlug, winner.user_id]);
+      if (sameWinner) {
+        // Kein neuer Logeintrag → nur jüngsten winners-Eintrag zeitlich auffrischen
+        await db.query(`
+          UPDATE winners
+          SET won_at = NOW(), window_end_at = NOW() + INTERVAL '48 hours'
+          WHERE ctid IN (
+            SELECT ctid FROM winners
+            WHERE guild_id = $1 AND item_slug = $2 AND user_id = $3
+              AND won_at > NOW() - INTERVAL '48 hours'
+            ORDER BY won_at DESC
+            LIMIT 1
+          )
+        `, [guildId, itemSlug, winner.user_id]);
 
-      await db.query(`
-        INSERT INTO wins
-          (guild_id, user_id, win_count, updated_at, item_slug, item_name_first, winner_user_id, reason, rolled_at, roll_value)
-        VALUES
-          ($1,      $2,     1,         NOW(),      $3,        $4,              $2,            $5,     NOW(),    $6)
-        ON CONFLICT (guild_id, user_id)
-        DO UPDATE SET
-          win_count       = wins.win_count + 1,
-          updated_at      = NOW(),
-          rolled_at       = NOW(),
-          item_slug       = EXCLUDED.item_slug,
-          item_name_first = EXCLUDED.item_name_first,
-          winner_user_id  = EXCLUDED.winner_user_id,
-          reason          = EXCLUDED.reason,
-          roll_value      = EXCLUDED.roll_value
-      `, [guildId, winner.user_id, itemSlug, itemName, winner.reason, winner.roll]);
+        // wins: KEIN win_count++ → nur Metadaten aktualisieren
+        await db.query(`
+          UPDATE wins
+          SET updated_at = NOW(),
+              rolled_at  = NOW(),
+              item_slug  = $3,
+              item_name_first = $4,
+              winner_user_id  = $2,
+              reason          = $5,
+              roll_value      = $6
+          WHERE guild_id = $1 AND user_id = $2
+        `, [guildId, winner.user_id, itemSlug, itemName, winner.reason, winner.roll]);
+      } else {
+        // Neuer Gewinner → normal loggen + win_count++
+        await db.query(`
+          INSERT INTO winners (guild_id, item_slug, user_id, won_at, window_end_at)
+          VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '48 hours')
+        `, [guildId, itemSlug, winner.user_id]);
+
+        await db.query(`
+          INSERT INTO wins
+            (guild_id, user_id, win_count, updated_at, item_slug, item_name_first, winner_user_id, reason, rolled_at, roll_value)
+          VALUES
+            ($1,      $2,     1,         NOW(),      $3,        $4,              $2,            $5,     NOW(),    $6)
+          ON CONFLICT (guild_id, user_id)
+          DO UPDATE SET
+            win_count       = wins.win_count + 1,
+            updated_at      = NOW(),
+            rolled_at       = NOW(),
+            item_slug       = EXCLUDED.item_slug,
+            item_name_first = EXCLUDED.item_name_first,
+            winner_user_id  = EXCLUDED.winner_user_id,
+            reason          = EXCLUDED.reason,
+            roll_value      = EXCLUDED.roll_value
+        `, [guildId, winner.user_id, itemSlug, itemName, winner.reason, winner.roll]);
+      }
 
       await db.query("COMMIT");
       stored = true;
