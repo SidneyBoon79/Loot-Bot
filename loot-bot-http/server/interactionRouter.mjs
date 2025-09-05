@@ -1,6 +1,5 @@
-// server/interactionRouter.mjs — FINAL (mit vote-remove-select)
+// server/interactionRouter.mjs — FINAL (inkl. reducew-select)
 
-// Commands
 import * as vote from "../commands/vote.mjs";
 import * as voteInfo from "../commands/vote-info.mjs";
 import * as voteClear from "../commands/vote-clear.mjs";
@@ -12,16 +11,14 @@ import * as rollAll from "../commands/roll-all.mjs";
 import * as reroll from "../commands/reroll.mjs";
 import * as reducew from "../commands/reducew.mjs";
 
-// Interactions
 import { handleVoteItemAutocomplete } from "../interactions/autocomplete/vote-item.mjs";
 import { handleVoteReason } from "../interactions/components/vote-reason.mjs";
 import { handleVoteRemove } from "../interactions/components/vote-remove.mjs";
 import * as rerollSelect from "../interactions/components/reroll-select.mjs";
 import * as rollSelect from "../interactions/components/roll-select.mjs";
-// NEW: vote-remove-select Component
 import * as voteRemoveSelect from "../interactions/components/vote-remove-select.mjs";
-
-// ---- Helpers ---------------------------------------------------------------
+// NEW:
+import * as reducewSelect from "../interactions/components/reducew-select.mjs";
 
 function getVal(maybeFn) {
   try { return typeof maybeFn === "function" ? maybeFn() : maybeFn; }
@@ -34,15 +31,14 @@ function buildOptsAPI(interaction) {
     getString:  (name) => opts.find(o => o?.name === name)?.value ?? null,
     getInteger: (name) => opts.find(o => o?.name === name)?.value ?? null,
     getBoolean: (name) => opts.find(o => o?.name === name)?.value ?? null,
+    getUser:    (name) => null, // in diesem Projekt werden User sonst id-basiert genutzt
   };
 }
-
-// ---- Router ----------------------------------------------------------------
 
 export async function routeInteraction(ctx) {
   const type = ctx.type?.();
 
-  // --- Application Commands (type 2) ---
+  // Commands
   if (type === 2) {
     const name = ctx.commandName?.();
     const baseCtx = {
@@ -78,17 +74,17 @@ export async function routeInteraction(ctx) {
     }
   }
 
-  // --- Autocomplete (type 4) ---
+  // Autocomplete
   if (type === 4) {
     try {
       return await handleVoteItemAutocomplete(ctx);
     } catch (e) {
       console.error("Autocomplete error:", e);
-      return ctx.respond([]); // leere Liste statt Fehler
+      return ctx.respond([]);
     }
   }
 
-  // --- Components (type 3) ---
+  // Components
   if (type === 3) {
     const customId = ctx.customId?.() || ctx.interaction?.data?.custom_id;
     const baseCtx = {
@@ -106,7 +102,8 @@ export async function routeInteraction(ctx) {
     try {
       if (customId?.startsWith("reroll-select"))       return await (rerollSelect.run?.(baseCtx));
       if (customId?.startsWith("roll-select"))         return await (rollSelect.run?.(baseCtx));
-      if (customId?.startsWith("vote-remove-select"))  return await (voteRemoveSelect.run?.(baseCtx)); // NEW
+      if (customId?.startsWith("vote-remove-select"))  return await (voteRemoveSelect.run?.(baseCtx));
+      if (customId?.startsWith("reducew-select"))      return await (reducewSelect.run?.(baseCtx)); // NEW
       if (customId?.startsWith("vote:grund:"))         return await handleVoteReason(baseCtx);
       if (customId === "vote:remove")                  return await handleVoteRemove(baseCtx);
 
@@ -117,7 +114,7 @@ export async function routeInteraction(ctx) {
     }
   }
 
-  // --- Modal Submit (type 5) ---
+  // Modal Submit
   if (type === 5) {
     return ctx.reply("❌ Unbekannte Modal-Aktion.", { ephemeral: true });
   }
