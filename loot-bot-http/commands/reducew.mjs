@@ -1,11 +1,16 @@
 // commands/reducew.mjs
-// Mods können Wins reduzieren: UI = Select mit allen Usern, die win_count > 0 haben.
-// Ein Klick reduziert um 1 (niemals < 0). Ephemeral.
+// Wins reduzieren – unterstützt zwei Wege:
+// 1) Optionen genutzt (user, anzahl)  -> direkte Reduktion
+// 2) keine Optionen                   -> Dropdown mit allen Usern (jede Auswahl -1)
+//
+// Nur für Mods (hasModPerm).
 
 import { hasModPerm } from "../services/permissions.mjs";
 
 export const name = "reducew";
-export const description = "Wins reduzieren (per Auswahl)";
+export const description = "Wins eines Users reduzieren (Dropdown + direkte Option)";
+
+// ---- Helpers ---------------------------------------------------------------
 
 async function fetchUsersWithWins(db, guildId) {
   const { rows } = await db.query(
@@ -45,6 +50,23 @@ function buildSelect(users) {
   };
 }
 
+function getGuildId(ctx) {
+  return (
+    (typeof ctx.guildId === "function" ? ctx.guildId() : ctx.guildId) ??
+    ctx.guild_id ??
+    ctx.guild?.id ??
+    null
+  );
+}
+
+// Holt Options roh aus der Interaction (weil getUser im Projekt nicht verdrahtet ist)
+function getRawOption(ctx, name) {
+  const ops = ctx.interaction?.data?.options || [];
+  return ops.find((o) => o?.name === name)?.value ?? null;
+}
+
+// ---- Command ---------------------------------------------------------------
+
 export async function run(ctx) {
   try {
     if (!hasModPerm(ctx)) {
@@ -54,14 +76,44 @@ export async function run(ctx) {
     const db = ctx.db;
     if (!db) return ctx.reply("❌ DB nicht verfügbar.", { ephemeral: true });
 
-    const guildId =
-      (typeof ctx.guildId === "function" ? ctx.guildId() : ctx.guildId) ??
-      ctx.guild_id ?? ctx.guild?.id ?? null;
-
+    const guildId = getGuildId(ctx);
     if (!guildId) {
       return ctx.reply("❌ Keine Guild-ID ermittelbar.", { ephemeral: true });
     }
 
+    // 1) Versuche direkte Reduktion, falls Options angegeben wurden
+    const userIdOpt = getRawOption(ctx, "user");     // USER-Option liefert direkt die Snowflake-ID
+    const amountOpt = getRawOption(ctx, "anzahl");   // INTEGER
+    const amount = Math.max(1, Number(amountOpt ?? 1) || 1);
+
+    if (userIdOpt) {
+      // Direkte Reduktion
+      const { rows, rowCount } = await db.query(
+        `
+        UPDATE wins
+           SET win_count = GREATEST(win_count - $3, 0),
+               updated_at = NOW()
+         WHERE guild_id = $1
+           AND user_id  = $2
+        RETURNING win_count
+        `,
+        [guildId, userIdOpt, amount]
+      );
+
+      if (rowCount === 0) {
+        return ctx.reply(`⚠️ Für <@${userIdOpt}> existiert kein Wins-Eintrag.`, {
+          ephemeral: true,
+        });
+      }
+
+      const newCount = rows[0].win_count;
+      return ctx.reply(
+        `✅ Reduziert: <@${userIdOpt}> um **${amount}** · neuer Stand **W${newCount}**.`,
+        { ephemeral: true }
+      );
+    }
+
+    // 2) Keine Options → Dropdown zeigen
     const users = await fetchUsersWithWins(db, guildId);
     if (!users.length) {
       return ctx.reply("ℹ️ Es gibt aktuell keine User mit Wins > 0.", {
