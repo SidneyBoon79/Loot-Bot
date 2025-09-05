@@ -1,5 +1,5 @@
 // interactions/components/roll-select.mjs
-// Production: Log in `winners` (immer INSERT) + Upsert in `wins` (PK: guild_id, item_slug, winner_user_id).
+// Production: Log in `winners` (immer INSERT) + Upsert in `wins` (PK: guild_id, user_id).
 // Fairness (48h) wird aus `winners` gezählt. Anzeige mit 🥇/🥈/🥉 und 🏆.
 
 import { hasModPerm } from "../../services/permissions.mjs";
@@ -108,22 +108,25 @@ export async function run(ctx){
         VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '48 hours')
       `, [guildId, itemSlug, winner.user_id]);
 
-      // 2) AGGREGAT in `wins` (UPSERT auf PK: guild_id, item_slug, winner_user_id)
+      // 2) AGGREGAT in `wins`
+      //    Upsert auf PK (guild_id, user_id) – das ist dein wins_pkey.
+      //    Pflichtfelder: user_id (NOT NULL) + updated_at setzen.
       await db.query(`
         INSERT INTO wins
-          (guild_id, item_slug, item_name_first, winner_user_id, user_id, reason, roll_value, rolled_at, updated_at, win_count)
+          (guild_id, user_id, win_count, updated_at, item_slug, item_name_first, winner_user_id, reason, rolled_at, roll_value)
         VALUES
-          ($1,       $2,        $3,               $4,            $4,     $5,      $6,        NOW(),    NOW(),     1)
-        ON CONFLICT (guild_id, item_slug, winner_user_id)
+          ($1,      $2,     1,         NOW(),      $3,        $4,              $2,            $5,     NOW(),    $6)
+        ON CONFLICT (guild_id, user_id)
         DO UPDATE SET
           win_count       = wins.win_count + 1,
           updated_at      = NOW(),
           rolled_at       = NOW(),
-          roll_value      = EXCLUDED.roll_value,
-          reason          = EXCLUDED.reason,
+          item_slug       = EXCLUDED.item_slug,
           item_name_first = EXCLUDED.item_name_first,
-          user_id         = EXCLUDED.user_id
-      `, [guildId, itemSlug, itemName, winner.user_id, winner.reason, winner.roll]);
+          winner_user_id  = EXCLUDED.winner_user_id,
+          reason          = EXCLUDED.reason,
+          roll_value      = EXCLUDED.roll_value
+      `, [guildId, winner.user_id, itemSlug, itemName, winner.reason, winner.roll]);
 
       await db.query("COMMIT");
       stored = true;
@@ -133,8 +136,7 @@ export async function run(ctx){
       stored = false;
     }
 
-    // Gewinner-Wins neu berechnen (COUNT aus winners 48h) + 1 ist falsch, da wir bereits geloggt haben.
-    // Also erneut zählen nach dem Insert:
+    // Gewinner-Wins neu berechnen (COUNT aus winners 48h; item-spezifisch)
     let winnerWinCount = 1;
     try{
       const { rows: wcount } = await db.query(`
