@@ -1,4 +1,4 @@
-// server/interactionRouter.mjs — FINAL
+// server/interactionRouter.mjs — FINAL (mit vote-remove-select)
 
 // Commands
 import * as vote from "../commands/vote.mjs";
@@ -18,6 +18,8 @@ import { handleVoteReason } from "../interactions/components/vote-reason.mjs";
 import { handleVoteRemove } from "../interactions/components/vote-remove.mjs";
 import * as rerollSelect from "../interactions/components/reroll-select.mjs";
 import * as rollSelect from "../interactions/components/roll-select.mjs";
+// NEW: vote-remove-select Component
+import * as voteRemoveSelect from "../interactions/components/vote-remove-select.mjs";
 
 // ---- Helpers ---------------------------------------------------------------
 
@@ -102,10 +104,11 @@ export async function routeInteraction(ctx) {
     };
 
     try {
-      if (customId?.startsWith("reroll-select")) return await (rerollSelect.run?.(baseCtx));
-      if (customId?.startsWith("roll-select"))   return await (rollSelect.run?.(baseCtx));
-      if (customId?.startsWith("vote:grund:"))   return await handleVoteReason(baseCtx);
-      if (customId === "vote:remove")            return await handleVoteRemove(baseCtx);
+      if (customId?.startsWith("reroll-select"))       return await (rerollSelect.run?.(baseCtx));
+      if (customId?.startsWith("roll-select"))         return await (rollSelect.run?.(baseCtx));
+      if (customId?.startsWith("vote-remove-select"))  return await (voteRemoveSelect.run?.(baseCtx)); // NEW
+      if (customId?.startsWith("vote:grund:"))         return await handleVoteReason(baseCtx);
+      if (customId === "vote:remove")                  return await handleVoteRemove(baseCtx);
 
       return ctx.reply("❌ Unbekanntes Component.", { ephemeral: true });
     } catch (e) {
