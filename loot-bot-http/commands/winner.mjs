@@ -1,23 +1,9 @@
 // commands/winner.mjs
 // Zeigt pro Item den letzten/aktuellen Gewinner (letzte 48h), kompakt & ephemeral.
-
-import items from "../data/items.json" assert { type: "json" };
+// Namen: bevorzugt aus votes (48h), sonst aus wins, sonst slug.
 
 export const name = "winner";
 export const description = "Aktuelle Gewinner je Item (48h, kompakt)";
-
-function mapNameFromItemsJson(slug) {
-  try {
-    if (!slug) return null;
-    const hit = items.find(
-      (it) =>
-        String(it.slug || "").toLowerCase() === String(slug || "").toLowerCase()
-    );
-    return hit?.name_first || hit?.name || null;
-  } catch {
-    return null;
-  }
-}
 
 export async function run(ctx) {
   try {
@@ -38,8 +24,8 @@ export async function run(ctx) {
       });
     }
 
-    // 1) Pro Item den neuesten Gewinner innerhalb der letzten 48h
-    //    DISTINCT ON wählt je item_slug den jüngsten won_at.
+    // Pro Item den neuesten Gewinner der letzten 48h holen.
+    // Namen zuerst aus votes(48h), sonst aus wins (beliebig aktuell), sonst slug.
     const { rows } = await db.query(
       `
       WITH latest_winners AS (
@@ -52,19 +38,27 @@ export async function run(ctx) {
           AND won_at   > NOW() - INTERVAL '48 hours'
         ORDER BY item_slug, won_at DESC
       ),
-      names AS (
+      names_votes AS (
         SELECT item_slug, MIN(item_name_first) AS item_name
         FROM votes
         WHERE guild_id   = $1
           AND created_at > NOW() - INTERVAL '48 hours'
         GROUP BY item_slug
+      ),
+      names_wins AS (
+        SELECT item_slug, MAX(item_name_first) AS item_name
+        FROM wins
+        WHERE guild_id = $1
+        GROUP BY item_slug
       )
-      SELECT lw.item_slug,
-             lw.user_id,
-             lw.won_at,
-             n.item_name
+      SELECT
+        lw.item_slug,
+        lw.user_id,
+        lw.won_at,
+        COALESCE(nv.item_name, nw.item_name, lw.item_slug) AS item_name
       FROM latest_winners lw
-      LEFT JOIN names n USING (item_slug)
+      LEFT JOIN names_votes nv USING (item_slug)
+      LEFT JOIN names_wins   nw USING (item_slug)
       ORDER BY lw.won_at DESC
       `,
       [guildId]
@@ -76,13 +70,7 @@ export async function run(ctx) {
       });
     }
 
-    // 2) Namen robust bestimmen: votes (48h) → items.json → slug
-    const lines = rows.map((r) => {
-      const fromVotes = r.item_name && String(r.item_name).trim();
-      const fromItems = mapNameFromItemsJson(r.item_slug);
-      const displayName = fromVotes || fromItems || r.item_slug;
-      return `• **${displayName}** → <@${r.user_id}>`;
-    });
+    const lines = rows.map((r) => `• **${r.item_name}** → <@${r.user_id}>`);
 
     return ctx.reply(`🏆 **Gewinner (letzte 48h)**\n${lines.join("\n")}`, {
       ephemeral: true,
