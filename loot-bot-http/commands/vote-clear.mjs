@@ -1,59 +1,42 @@
-// commands/vote-clear.mjs (FINAL)
-// Löscht alle Votes und Items der aktuellen Guild.
-// Nur für Nutzer mit Manage Guild ODER Administrator.
+// commands/vote-clear.mjs
+// Setzt alles zurück: votes + winners + wins (nur für Mods)
 
-function hasPermBit(permStr, bitIndex) {
-  try {
-    if (!permStr) return false;
-    const v = BigInt(permStr);
-    return (v & (1n << BigInt(bitIndex))) !== 0n;
-  } catch {
-    return false;
-  }
-}
+import { hasModPerm } from "../services/permissions.mjs";
 
-const PERMS = {
-  ADMINISTRATOR: 3, // 0x00000008
-  MANAGE_GUILD: 5,  // 0x00000020
-};
+export const name = "vote-clear";
+export const description = "Alle Votes, Winners & Wins für diese Guild zurücksetzen (Mods)";
 
 export async function run(ctx) {
   try {
-    const member = typeof ctx.member === "function" ? ctx.member() : ctx.member;
-    const guildId = typeof ctx.guildId === "function" ? ctx.guildId() : ctx.guildId;
-
-    // --- Permission Check ---
-    const permStr = member?.permissions; // Discord Bitfield als String
-    const isAdmin = hasPermBit(permStr, PERMS.ADMINISTRATOR);
-    const canManageGuild = hasPermBit(permStr, PERMS.MANAGE_GUILD);
-    if (!isAdmin && !canManageGuild) {
-      return ctx.reply("❌ Keine Berechtigung (benötigt: Administrator oder Manage Server).", { ephemeral: true });
+    if (!hasModPerm(ctx)) {
+      return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
     }
 
-    if (!ctx.db) {
+    const db = ctx.db;
+    if (!db) {
       return ctx.reply("❌ Datenbank nicht verfügbar.", { ephemeral: true });
     }
 
-    // --- Cleanup innerhalb einer Transaktion ---
-    const db = ctx.db;
-    await db.query("BEGIN");
-    try {
-      // Votes der Guild löschen
-      await db.query("DELETE FROM votes WHERE guild_id = $1", [guildId]);
-      // Items der Guild löschen (nur Katalog-Einträge, Rollen-Historie damit clean)
-      await db.query("DELETE FROM items WHERE guild_id = $1", [guildId]);
-      await db.query("COMMIT");
-    } catch (e) {
-      await db.query("ROLLBACK");
-      console.error("[vote-clear] DB error:", e);
-      return ctx.reply("❌ Konnte nicht leeren.", { ephemeral: true });
+    const guildId =
+      (typeof ctx.guildId === "function" ? ctx.guildId() : ctx.guildId) ??
+      ctx.guild_id ?? ctx.guild?.id ?? null;
+
+    if (!guildId) {
+      return ctx.reply("❌ Keine Guild-ID ermittelbar.", { ephemeral: true });
     }
 
-    return ctx.reply("🧹 Alles sauber: Votes & Items dieser Guild wurden gelöscht.", { ephemeral: true });
+    await db.query("BEGIN");
+    await db.query("DELETE FROM votes    WHERE guild_id = $1", [guildId]);
+    await db.query("DELETE FROM winners  WHERE guild_id = $1", [guildId]);
+    await db.query("DELETE FROM wins     WHERE guild_id = $1", [guildId]);
+    await db.query("COMMIT");
+
+    return ctx.reply("🧹 Reset: Votes, Winners & Wins wurden gelöscht.", { ephemeral: true });
   } catch (e) {
-    console.error("[commands/vote-clear] error:", e);
-    return ctx.reply("❌ Unerwarteter Fehler.", { ephemeral: true });
+    try { await ctx.db?.query("ROLLBACK"); } catch {}
+    console.error("[vote-clear] error:", e);
+    return ctx.reply("⚠️ Fehler beim Zurücksetzen.", { ephemeral: true });
   }
 }
 
-export default { run };
+export default { name, description, run };
