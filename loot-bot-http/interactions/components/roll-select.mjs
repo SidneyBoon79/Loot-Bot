@@ -1,7 +1,7 @@
 // interactions/components/roll-select.mjs
-// Einfache, robuste Persistenz: pro Gewinn immer INSERT (kein UPDATE/Tx).
-// Aggregation der Wins weiterhin via COUNT(*) über 48h.
-// Nutzt ausschließlich winner_user_id (user_id-Spalte wird ignoriert).
+// Einfache Persistenz: pro Gewinn immer INSERT (kein UPDATE/Tx).
+// Schema-fit: setzt winner_user_id + user_id + updated_at.
+// W-Zähler via COUNT(*) über 48h.
 
 import { hasModPerm } from "../../services/permissions.mjs";
 
@@ -9,11 +9,10 @@ export const id = "roll-select";
 export const idStartsWith = "roll-select";
 
 const PRIO = { gear: 2, trait: 1, litho: 0 };
-
-const norm = (x) => String(x ?? "").trim().toLowerCase();
+const norm  = (x) => String(x ?? "").trim().toLowerCase();
 const emoji = (r) => ({ gear:"🗡️", trait:"💠", litho:"📜" }[String(r||"").toLowerCase()] || "❔");
 const medal = (i) => (i===0?"🥇":i===1?"🥈":i===2?"🥉":"–");
-const d20 = () => Math.floor(Math.random()*20)+1;
+const d20   = () => Math.floor(Math.random()*20)+1;
 
 // Fairness: Gear > Trait > Litho → Wins (ASC) → Roll (DESC)
 function cmp(a,b){
@@ -42,7 +41,7 @@ export async function run(ctx){
     const itemSlug = norm(values[0]);
     if(!itemSlug) return ctx.reply("⚠️ Ungültige Auswahl.", {ephemeral:true});
 
-    // Für die Anzeige: Itemname aus Votes (48h)
+    // Itemname (48h)
     const { rows: nrows } = await db.query(`
       SELECT MIN(item_name_first) AS name
       FROM votes
@@ -52,7 +51,7 @@ export async function run(ctx){
     `, [guildId, itemSlug]);
     const itemName = nrows?.[0]?.name || itemSlug;
 
-    // Teilnehmer (neuester Grund je User im 48h-Fenster) + aktuelle Wins (48h, per COUNT)
+    // Teilnehmer (neuester Grund je User, 48h) + aktuelle Wins (48h)
     const { rows: participants } = await db.query(`
       WITH latest AS (
         SELECT DISTINCT ON (user_id)
@@ -81,7 +80,7 @@ export async function run(ctx){
     }
 
     // Würfeln & sortieren
-    let rolled = participants.map(p => ({...p, roll: d20()})).sort(cmp);
+    const rolled = participants.map(p => ({...p, roll: d20()})).sort(cmp);
 
     // Full tie an der Spitze → Sudden-Death
     const top = rolled.filter(e => cmp(e, rolled[0])===0);
@@ -96,17 +95,21 @@ export async function run(ctx){
       }
     }
 
-    // Persistenz: IMMER INSERT (ein Gewinn == eine Zeile)
+    // Persistenz: INSERT mit winner_user_id **und** user_id + updated_at
     let stored = false;
     try{
       await db.query(`
         INSERT INTO wins
-          (guild_id, item_slug, item_name_first, winner_user_id, reason, roll_value, rolled_at, win_count)
+          (guild_id, item_slug, item_name_first, winner_user_id, user_id, reason, roll_value, rolled_at, updated_at, win_count)
         VALUES
-          ($1,       $2,        $3,               $4,            $5,     $6,        NOW(),      1)
+          ($1,       $2,        $3,               $4,            $4,     $5,      $6,        NOW(),    NOW(),     1)
       `, [guildId, itemSlug, itemName, winner.user_id, winner.reason, winner.roll]);
       stored = true;
-    }catch{ stored = false; }
+    }catch(e){
+      // Wenn das INSERT scheitert, bleibt stored=false und wir zeigen den Hinweis.
+      console.error("[wins insert failed]", e?.message || e);
+      stored = false;
+    }
 
     // Anzeige: W-Zähler = bisherige COUNT(*) + 1
     const winnerWinCount = (winner.wins ?? 0) + 1;
