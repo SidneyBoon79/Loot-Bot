@@ -1,19 +1,13 @@
 // commands/reducew.mjs
-// Keine Abhängigkeit auf eure lib/db.mjs – eigene, schlanke DB-Connection
 import fetch from "node-fetch";
 import { Pool } from "pg";
 
-// --- DB Pool (Railway/Standard) --------------------------------------------
+// --- DB Pool (keine Abhängigkeit auf eure lib/db.mjs)
 const pool =
   globalThis.__lb_pool ||
   (globalThis.__lb_pool = new Pool({
-    connectionString:
-      process.env.DATABASE_URL ||
-      undefined, // nutzt ggf. PGHOST/PGUSER/PGPASSWORD/PGDATABASE/PGPORT
-    ssl:
-      process.env.PGSSL === "disable"
-        ? false
-        : { rejectUnauthorized: false }, // Railway-kompatibel
+    connectionString: process.env.DATABASE_URL || undefined,
+    ssl: process.env.PGSSL === "disable" ? false : { rejectUnauthorized: false },
   }));
 
 async function dbQuery(text, params) {
@@ -26,11 +20,10 @@ async function dbQuery(text, params) {
   }
 }
 
-// --- Discord REST Helper: Namen holen --------------------------------------
+// --- Discord REST: Name holen
 async function fetchUserName(userId) {
   const token = process.env.BOT_TOKEN;
   if (!token) return userId;
-
   try {
     const res = await fetch(`https://discord.com/api/v10/users/${userId}`, {
       headers: { Authorization: `Bot ${token}` },
@@ -43,7 +36,7 @@ async function fetchUserName(userId) {
   }
 }
 
-// --- Slash Command Definition (ohne Options) --------------------------------
+// --- Command-Definition (ohne Options)
 export const data = {
   name: "reducew",
   description:
@@ -51,7 +44,7 @@ export const data = {
   type: 1, // CHAT_INPUT
 };
 
-// --- Execute: Dropdown mit lesbaren Namen -----------------------------------
+// --- Hauptlogik: Dropdown mit lesbaren Namen
 export async function execute(interaction) {
   const guildId = interaction.guildId;
 
@@ -72,13 +65,11 @@ export async function execute(interaction) {
     });
   }
 
-  // Namen parallel auflösen
   const namePairs = await Promise.all(
     rows.map(async (r) => [r.member_id, await fetchUserName(r.member_id)])
   );
   const nameById = Object.fromEntries(namePairs);
 
-  // Komponenten als rohes Discord-JSON (kein discord.js nötig)
   const options = rows.map((r) => ({
     label: `${nameById[r.member_id]} — W${r.win_count}`,
     value: r.member_id,
@@ -108,3 +99,6 @@ export async function execute(interaction) {
     ephemeral: true,
   });
 }
+
+// --- Kompatibilität zu eurem Router
+export const run = execute;
