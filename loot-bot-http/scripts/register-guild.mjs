@@ -39,18 +39,18 @@ const commands = [
   // neue /reducew (ohne Options; Dropdown folgt im UI)
   { name: "reducew",     description: "Wins reduzieren (Dropdown, -1 pro Klick).", type: 1 },
 
-  $1
+  { name: "vote-info",   description: "Kurz-Anleitung.", type: 1 },
 
-  // /changew <user> <amount>
+  // /changew <user> <amount> – freier Integer (negativ/positiv)
   {
     name: "changew",
     description: "Wins anpassen (händisch Wert angeben)",
     type: 1,
     options: [
-      { type: 3, name: "user", description: "User ID oder @Mention", required: true },
+      { type: 3, name: "user",   description: "User ID oder @Mention", required: true },
       { type: 4, name: "amount", description: "Änderung der Wins (negativ oder positiv)", required: true }
     ]
-  },
+  }
 ];
 
 async function main() {
