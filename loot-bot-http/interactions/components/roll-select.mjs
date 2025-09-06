@@ -1,4 +1,4 @@
-import { db } from "../db.js";
+import { db } from "../../db.js";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -40,21 +40,17 @@ export async function handleRollSelect(interaction) {
   }
 
   // Sortierung: Gear > Trait > Litho -> Wins (aufsteigend) -> Roll (absteigend)
-  const rolls = participants.map((p) => {
-    return {
-      ...p,
-      roll: Math.floor(Math.random() * 20) + 1,
-    };
-  });
+  const rolls = participants.map((p) => ({
+    ...p,
+    roll: Math.floor(Math.random() * 20) + 1,
+  }));
 
   rolls.sort((a, b) => {
     const typeOrder = { gear: 1, trait: 2, litho: 3 };
     if (typeOrder[a.item_type] !== typeOrder[b.item_type]) {
       return typeOrder[a.item_type] - typeOrder[b.item_type];
     }
-    if (a.wins !== b.wins) {
-      return a.wins - b.wins;
-    }
+    if (a.wins !== b.wins) return a.wins - b.wins;
     return b.roll - a.roll;
   });
 
@@ -69,8 +65,8 @@ export async function handleRollSelect(interaction) {
     [guildId, itemSlug, winner.user_id]
   );
 
-  // Gewinner-Wins neu abfragen (global, 48h)
-  const winnerWinCount = await db.oneOrNone(
+  // Gewinner-Wins neu abfragen (global, 48 h)
+  const winnerWinCount = await db.one(
     `
     SELECT COUNT(*)::int AS c
     FROM winners
