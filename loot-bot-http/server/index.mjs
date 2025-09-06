@@ -22,8 +22,10 @@ function makeCtx(interaction, res) {
   // Normalisiert Message-Daten (string oder object)
   const normalizeData = (data, opts = {}) => {
     if (data && typeof data === "object" && (data.content || data.embeds || data.components)) {
-      const flags = opts.ephemeral ? 64 : data.flags;
-      return { ...data, flags };
+      const { ephemeral, ...rest } = data;              // 👈 ephemeral aus data ziehen
+      const isEphemeral = opts.ephemeral ?? ephemeral;  // 👈 data.ephemeral oder opts.ephemeral
+      const flags = isEphemeral ? 64 : rest.flags;      // 👈 ephemeral → flags:64
+      return { ...rest, flags };                        // 👈 ephemeral nicht weitergeben
     }
     return { content: String(data ?? ""), flags: opts.ephemeral ? 64 : undefined };
   };
