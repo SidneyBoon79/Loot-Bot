@@ -1,16 +1,15 @@
 // commands/roll-all.mjs
-// Globaler Win-Count über alle Items (48h)
+// Rollt alle Items; Win-Count wird global (48h, über alle Items) gezählt.
 
-import { SlashCommandBuilder } from "discord.js";
-
-export const command = new SlashCommandBuilder()
-  .setName("roll-all")
-  .setDescription("Würfelt alle Items gleichzeitig aus.");
+export const command = {
+  name: "roll-all",
+  description: "Würfelt alle Items gleichzeitig aus.",
+};
 
 export async function execute(interaction, ctx) {
   const guildId = interaction.guild.id;
 
-  // Alle offenen Items holen
+  // Alle offenen Items der letzten 48h
   const { rows: items } = await ctx.db.query(
     `
     SELECT DISTINCT item_slug, item_name
@@ -25,9 +24,23 @@ export async function execute(interaction, ctx) {
     return interaction.reply("ℹ️ Keine Items zum Auswürfeln gefunden.");
   }
 
+  const d20 = () => Math.floor(Math.random() * 20) + 1;
+  const PRIO = { gear: 2, trait: 1, litho: 0 };
+  const cmp = (a, b) => {
+    const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
+    if (g) return g;
+    const w = (a.wins ?? 0) - (b.wins ?? 0);
+    if (w) return w;
+    return (b.roll ?? 0) - (a.roll ?? 0);
+  };
+  const emoji = (r) =>
+    ({ gear: "🗡️", trait: "💠", litho: "📜" }[String(r || "").toLowerCase()] || "❔");
+  const medal = (i) => (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "–");
+
   let messages = [];
 
   for (const it of items) {
+    // Teilnehmer (letzter Vote pro User zu diesem Item) + GLOBALER Win-Count (48h, über alle Items)
     const { rows: participants } = await ctx.db.query(
       `
       WITH latest AS (
@@ -58,18 +71,6 @@ export async function execute(interaction, ctx) {
       continue;
     }
 
-    // Roll logic
-    const d20 = () => Math.floor(Math.random() * 20) + 1;
-    const PRIO = { gear: 2, trait: 1, litho: 0 };
-
-    const cmp = (a, b) => {
-      const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
-      if (g) return g;
-      const w = (a.wins ?? 0) - (b.wins ?? 0);
-      if (w) return w;
-      return (b.roll ?? 0) - (a.roll ?? 0);
-    };
-
     let rolled = participants.map((p) => ({ ...p, roll: d20() })).sort(cmp);
     const winner = rolled[0];
 
@@ -94,10 +95,6 @@ export async function execute(interaction, ctx) {
       [guildId, winner.user_id]
     );
     const winnerWinCount = wcount?.[0]?.c ?? 1;
-
-    const emoji = (r) =>
-      ({ gear: "🗡️", trait: "💠", litho: "📜" }[String(r || "").toLowerCase()] || "❔");
-    const medal = (i) => (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "–");
 
     const lines = rolled.map(
       (p, i) =>
