@@ -1,5 +1,6 @@
 // commands/roll-all.mjs
-// Globaler Win-Count über alle Items (48h)
+// Würfelt alle offenen Items der letzten 48h aus.
+// Win-Count wird GLOBAL über alle Items innerhalb von 48h gezählt (aus Tabelle `winners`).
 
 export const id = "roll-all";
 export const description = "Würfelt alle Items gleichzeitig aus.";
@@ -20,10 +21,10 @@ const medal = (i) => (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "
 export async function run(ctx) {
   const guildId = ctx.guildId;
 
-  // Alle offenen Items der letzten 48h
+  // Alle offenen Items der letzten 48h – Name kommt aus item_name_first
   const { rows: items } = await ctx.db.query(
     `
-    SELECT DISTINCT item_slug, item_name
+    SELECT DISTINCT item_slug, item_name_first
     FROM votes
     WHERE guild_id = $1
       AND created_at > NOW() - INTERVAL '48 hours'
@@ -38,6 +39,11 @@ export async function run(ctx) {
   let messages = [];
 
   for (const it of items) {
+    const itemSlug = it.item_slug;
+    const itemName = it.item_name_first ?? itemSlug;
+
+    // Teilnehmer: letzter Vote pro User für dieses Item (48h)
+    // + GLOBALER Win-Count aus winners (48h, ohne item_slug-Filter)
     const { rows: participants } = await ctx.db.query(
       `
       WITH latest AS (
@@ -49,38 +55,39 @@ export async function run(ctx) {
           AND created_at > NOW() - INTERVAL '48 hours'
         ORDER BY user_id, created_at DESC
       ),
-      wins48 AS (   -- ✨ global über alle Items
+      wins48 AS (
         SELECT user_id, COUNT(*)::int AS wins
         FROM winners
         WHERE guild_id = $1
           AND won_at > NOW() - INTERVAL '48 hours'
         GROUP BY user_id
       )
-      SELECT l.user_id, l.reason, COALESCE(w.wins,0) AS wins
+      SELECT l.user_id, l.reason, COALESCE(w.wins, 0) AS wins
       FROM latest l
       LEFT JOIN wins48 w USING (user_id)
       `,
-      [guildId, it.item_slug]
+      [guildId, itemSlug]
     );
 
     if (!participants?.length) {
-      messages.push(`ℹ️ Keine Teilnehmer für **${it.item_name}**.`);
+      messages.push(`ℹ️ Keine Teilnehmer für **${itemName}**.`);
       continue;
     }
 
+    // Würfeln + sortieren: Gear > Trait > Litho -> Wins (ASC) -> Roll (DESC)
     let rolled = participants.map((p) => ({ ...p, roll: d20() })).sort(cmp);
     const winner = rolled[0];
 
-    // Log in winners
+    // Gewinner im winners-Log festhalten (für 48h-Fenster)
     await ctx.db.query(
       `
       INSERT INTO winners (guild_id, item_slug, user_id, won_at, window_end_at)
       VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '48 hours')
       `,
-      [guildId, it.item_slug, winner.user_id]
+      [guildId, itemSlug, winner.user_id]
     );
 
-    // Gewinner-Wins neu (✨ global über alle Items)
+    // Gewinner-Wins neu berechnen (GLOBAL über alle Items, 48h)
     const { rows: wcount } = await ctx.db.query(
       `
       SELECT COUNT(*)::int AS c
@@ -99,7 +106,7 @@ export async function run(ctx) {
     );
 
     messages.push(
-      `🎲 Roll-Ergebnis für **${it.item_name}**:\n${lines.join(
+      `🎲 Roll-Ergebnis für **${itemName}**:\n${lines.join(
         "\n"
       )}\n\n🏆 Gewinner: <@${winner.user_id}> — ${emoji(
         winner.reason
