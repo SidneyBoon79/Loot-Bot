@@ -1,13 +1,24 @@
 // commands/roll-all.mjs
-// Rollt alle Items; Win-Count wird global (48h, über alle Items) gezählt.
+// Globaler Win-Count über alle Items (48h)
 
-export const command = {
-  name: "roll-all",
-  description: "Würfelt alle Items gleichzeitig aus.",
+export const id = "roll-all";
+export const description = "Würfelt alle Items gleichzeitig aus.";
+
+const d20 = () => Math.floor(Math.random() * 20) + 1;
+const PRIO = { gear: 2, trait: 1, litho: 0 };
+const cmp = (a, b) => {
+  const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
+  if (g) return g;
+  const w = (a.wins ?? 0) - (b.wins ?? 0);
+  if (w) return w;
+  return (b.roll ?? 0) - (a.roll ?? 0);
 };
+const emoji = (r) =>
+  ({ gear: "🗡️", trait: "💠", litho: "📜" }[String(r || "").toLowerCase()] || "❔");
+const medal = (i) => (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "–");
 
-export async function execute(interaction, ctx) {
-  const guildId = interaction.guild.id;
+export async function run(ctx) {
+  const guildId = ctx.guildId;
 
   // Alle offenen Items der letzten 48h
   const { rows: items } = await ctx.db.query(
@@ -21,26 +32,12 @@ export async function execute(interaction, ctx) {
   );
 
   if (!items?.length) {
-    return interaction.reply("ℹ️ Keine Items zum Auswürfeln gefunden.");
+    return ctx.reply("ℹ️ Keine Items zum Auswürfeln gefunden.");
   }
-
-  const d20 = () => Math.floor(Math.random() * 20) + 1;
-  const PRIO = { gear: 2, trait: 1, litho: 0 };
-  const cmp = (a, b) => {
-    const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
-    if (g) return g;
-    const w = (a.wins ?? 0) - (b.wins ?? 0);
-    if (w) return w;
-    return (b.roll ?? 0) - (a.roll ?? 0);
-  };
-  const emoji = (r) =>
-    ({ gear: "🗡️", trait: "💠", litho: "📜" }[String(r || "").toLowerCase()] || "❔");
-  const medal = (i) => (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "–");
 
   let messages = [];
 
   for (const it of items) {
-    // Teilnehmer (letzter Vote pro User zu diesem Item) + GLOBALER Win-Count (48h, über alle Items)
     const { rows: participants } = await ctx.db.query(
       `
       WITH latest AS (
@@ -110,5 +107,7 @@ export async function execute(interaction, ctx) {
     );
   }
 
-  return interaction.reply(messages.join("\n\n"));
+  return ctx.reply(messages.join("\n\n"));
 }
+
+export default { id, description, run };
