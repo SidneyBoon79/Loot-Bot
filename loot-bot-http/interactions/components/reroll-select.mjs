@@ -194,7 +194,7 @@ export async function run(ctx){
     const footer = `\n\n🏆 Gewinner: <@${winner.user_id}> — ${emoji(rTxt)} ${rTxt} · Wurf ${winner.roll} · (W${winnerWinCount})` + (stored ? "" : "  ⚠️ (nicht gespeichert)");
     const note   = winner._tieBreak ? `\n↪️ Tie-Break nur zwischen Gleichauf-Teilnehmern durchgeführt.` : "";
 
-    return ctx.reply(`${header}\n${lines.join("\n")}${footer}${note}`, {ephemeral:true});
+    return ctx.reply(`${header}\n${lines.join("\n")}${footer}${note}`, {ephemeral:false});
   }catch(e){
     console.error("[components/reroll-select] error:", e);
     return ctx.reply("⚠️ Unerwarteter Fehler beim Reroll.", {ephemeral:true});
