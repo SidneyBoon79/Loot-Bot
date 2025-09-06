@@ -1,9 +1,9 @@
 // commands/reducew.mjs
-// Eigenständige Version: kein import aus ../lib/db.mjs, kein discord.js
+// Eigenständig: kein ../lib/db.mjs, kein discord.js – nutzt pg + node-fetch
 import fetch from "node-fetch";
 import { Pool } from "pg";
 
-// ---------- DB ----------
+/* ---------- DB ---------- */
 const pool =
   globalThis.__lb_pool ||
   (globalThis.__lb_pool = new Pool({
@@ -20,7 +20,7 @@ async function dbQuery(text, params) {
   }
 }
 
-// ---------- Discord REST (Namen nur als Fallback; primär kommt Name aus members) ----------
+/* ---------- Discord REST (Fallback-Name) ---------- */
 async function fetchUserNameFallback(userId) {
   const token = process.env.BOT_TOKEN;
   if (!token) return String(userId);
@@ -36,21 +36,20 @@ async function fetchUserNameFallback(userId) {
   }
 }
 
-// ---------- Slash-Definition ----------
+/* ---------- Slash-Definition ---------- */
 export const data = {
   name: "reducew",
-  description:
-    "Wins reduzieren – wähle einen Gewinner (jeder Klick -1, niemals unter 0).",
+  description: "Wins reduzieren – wähle einen Gewinner (jeder Klick -1, niemals unter 0).",
   type: 1, // CHAT_INPUT
 };
 
-// ---------- Hauptlogik ----------
+/* ---------- Hauptlogik ---------- */
 async function execute(interaction) {
   const guildId = interaction.guildId;
 
-  // Schema wie in winner.mjs: wins.user_id + Join auf members für username
+  // Korrektes Schema: members.display_name
   const { rows } = await dbQuery(
-    `SELECT m.user_id, m.username, w.win_count
+    `SELECT m.user_id, m.display_name, w.win_count
        FROM wins w
        JOIN members m
          ON w.user_id = m.user_id
@@ -69,11 +68,11 @@ async function execute(interaction) {
     });
   }
 
-  // Namen aus members; falls leer, per REST fallbacken
+  // Anzeige: display_name; falls leer -> REST-Fallback
   const options = await Promise.all(
     rows.map(async (r) => {
       const name =
-        (r.username && String(r.username).trim()) ||
+        (r.display_name && String(r.display_name).trim()) ||
         (await fetchUserNameFallback(r.user_id));
       return {
         label: `${name} — W${r.win_count}`,
