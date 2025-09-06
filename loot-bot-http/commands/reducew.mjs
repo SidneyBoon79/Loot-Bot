@@ -1,91 +1,57 @@
 // commands/reducew.mjs
-// Wins reduzieren ausschließlich per Dropdown (je Klick -1). Nur für Mods.
+import { SlashCommandBuilder, ActionRowBuilder, StringSelectMenuBuilder } from 'discord.js';
+import { db } from '../lib/db.mjs';
 
-import { hasModPerm } from "../services/permissions.mjs";
+export const data = new SlashCommandBuilder()
+  .setName('reducew')
+  .setDescription('Wins reduzieren – wähle einen Gewinner (jeder Klick -1, niemals unter 0).');
 
-export const name = "reducew";
-export const description = "Wins reduzieren (Dropdown)";
+export async function execute(interaction) {
+  const guildId = interaction.guildId;
 
-async function fetchUsersWithWins(db, guildId) {
   const { rows } = await db.query(
-    `
-    SELECT user_id, win_count
-    FROM wins
-    WHERE guild_id = $1
-      AND win_count > 0
-    ORDER BY updated_at DESC, win_count DESC
-    LIMIT 25
-    `,
+    `SELECT member_id, win_count
+       FROM wins
+      WHERE guild_id = $1 AND win_count > 0
+      ORDER BY updated_at DESC, win_count DESC
+      LIMIT 25`,
     [guildId]
   );
-  return rows || [];
-}
 
-function buildSelect(users) {
-  const options = users.map((u) => ({
-    label: `User ${u.user_id} — W${u.win_count}`,
-    value: String(u.user_id),
-    description: `Wins: ${u.win_count}`,
+  if (!rows.length) {
+    return interaction.reply({
+      content: 'Es sind keine User mit Wins > 0 vorhanden.',
+      ephemeral: true,
+    });
+  }
+
+  // Usernamen auflösen
+  const pairs = await Promise.all(rows.map(async (r) => {
+    try {
+      const u = await interaction.client.users.fetch(r.member_id);
+      return [r.member_id, u?.username ?? r.member_id];
+    } catch {
+      return [r.member_id, r.member_id];
+    }
+  }));
+  const nameById = Object.fromEntries(pairs);
+
+  const options = rows.map(r => ({
+    label: `${nameById[r.member_id]} — W${r.win_count}`, // Username statt ID
+    value: r.member_id,
+    description: `Wins: ${r.win_count}`,
   }));
 
-  return {
-    type: 1, // Action Row
-    components: [
-      {
-        type: 3, // String Select
-        custom_id: "reducew-select",
-        placeholder: "Wähle einen User (reduziert um 1)",
-        min_values: 1,
-        max_values: 1,
-        options,
-      },
-    ],
-  };
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('reducew-select')
+    .setPlaceholder('Wähle einen User (reduziert um 1)')
+    .addOptions(options);
+
+  const row = new ActionRowBuilder().addComponents(select);
+
+  return interaction.reply({
+    content: '🏷️ **Wins reduzieren**\nWähle einen User — jeder Klick reduziert um **1** (niemals unter **0**).',
+    components: [row],
+    ephemeral: true,
+  });
 }
-
-function getGuildId(ctx) {
-  return (
-    (typeof ctx.guildId === "function" ? ctx.guildId() : ctx.guildId) ??
-    ctx.guild_id ??
-    ctx.guild?.id ??
-    null
-  );
-}
-
-export async function run(ctx) {
-  try {
-    if (!hasModPerm(ctx)) {
-      return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
-    }
-
-    const db = ctx.db;
-    if (!db) return ctx.reply("❌ DB nicht verfügbar.", { ephemeral: true });
-
-    const guildId = getGuildId(ctx);
-    if (!guildId) {
-      return ctx.reply("❌ Keine Guild-ID ermittelbar.", { ephemeral: true });
-    }
-
-    const users = await fetchUsersWithWins(db, guildId);
-    if (!users.length) {
-      return ctx.reply("ℹ️ Es gibt aktuell keine User mit Wins > 0.", {
-        ephemeral: true,
-      });
-    }
-
-    return ctx.reply(
-      {
-        content:
-          "🧮 **Wins reduzieren**\nWähle einen User — jeder Klick reduziert um **1** (niemals unter 0).",
-        components: [buildSelect(users)],
-        ephemeral: true,
-      },
-      { ephemeral: true }
-    );
-  } catch (e) {
-    console.error("[reducew] error:", e);
-    return ctx.reply("⚠️ Fehler bei /reducew.", { ephemeral: true });
-  }
-}
-
-export default { name, description, run };
