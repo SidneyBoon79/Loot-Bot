@@ -1,14 +1,36 @@
 // commands/reducew.mjs
-import { SlashCommandBuilder, ActionRowBuilder, StringSelectMenuBuilder } from 'discord.js';
+import fetch from 'node-fetch';
 import { db } from '../lib/db.mjs';
 
-export const data = new SlashCommandBuilder()
-  .setName('reducew')
-  .setDescription('Wins reduzieren – wähle einen Gewinner (jeder Klick -1, niemals unter 0).');
+// Discord REST Helper: Username/Displayname per API holen (ohne discord.js)
+async function fetchUserName(userId) {
+  const token = process.env.BOT_TOKEN;
+  if (!token) return userId;
+
+  try {
+    const res = await fetch(`https://discord.com/api/v10/users/${userId}`, {
+      headers: { Authorization: `Bot ${token}` }
+    });
+    if (!res.ok) return userId;
+    const u = await res.json();
+    // Bevorzugt "global_name" (neuer Anzeigename), sonst "username"
+    return u.global_name || u.username || userId;
+  } catch {
+    return userId;
+  }
+}
+
+// Plain JSON Command-Definition (keine Slash-Options!)
+export const data = {
+  name: 'reducew',
+  description: 'Wins reduzieren – wähle einen Gewinner (jeder Klick -1, niemals unter 0).',
+  type: 1, // CHAT_INPUT
+};
 
 export async function execute(interaction) {
   const guildId = interaction.guildId;
 
+  // Gewinner (W>0) laden
   const { rows } = await db.query(
     `SELECT member_id, win_count
        FROM wins
@@ -25,33 +47,38 @@ export async function execute(interaction) {
     });
   }
 
-  // Usernamen auflösen
-  const pairs = await Promise.all(rows.map(async (r) => {
-    try {
-      const u = await interaction.client.users.fetch(r.member_id);
-      return [r.member_id, u?.username ?? r.member_id];
-    } catch {
-      return [r.member_id, r.member_id];
-    }
-  }));
-  const nameById = Object.fromEntries(pairs);
+  // Lesbare Namen parallel holen (REST), 25 Anfragen sind noch ok
+  const namePairs = await Promise.all(
+    rows.map(async r => [r.member_id, await fetchUserName(r.member_id)])
+  );
+  const nameById = Object.fromEntries(namePairs);
 
+  // Komponenten als reines Discord-JSON (kein discord.js nötig)
   const options = rows.map(r => ({
-    label: `${nameById[r.member_id]} — W${r.win_count}`, // Username statt ID
+    label: `${nameById[r.member_id]} — W${r.win_count}`,
     value: r.member_id,
     description: `Wins: ${r.win_count}`,
   }));
 
-  const select = new StringSelectMenuBuilder()
-    .setCustomId('reducew-select')
-    .setPlaceholder('Wähle einen User (reduziert um 1)')
-    .addOptions(options);
-
-  const row = new ActionRowBuilder().addComponents(select);
+  const components = [
+    {
+      type: 1, // ActionRow
+      components: [
+        {
+          type: 3, // String Select
+          custom_id: 'reducew-select',
+          placeholder: 'Wähle einen User (reduziert um 1)',
+          min_values: 1,
+          max_values: 1,
+          options,
+        }
+      ]
+    }
+  ];
 
   return interaction.reply({
     content: '🏷️ **Wins reduzieren**\nWähle einen User — jeder Klick reduziert um **1** (niemals unter **0**).',
-    components: [row],
+    components,
     ephemeral: true,
   });
 }
