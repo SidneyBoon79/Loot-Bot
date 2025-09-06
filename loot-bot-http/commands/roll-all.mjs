@@ -1,5 +1,5 @@
 // commands/roll-all.mjs
-// Würfelt alle offenen Items der letzten 48h aus.
+// Würfelt alle offenen Items der letzten 48h aus, die noch nicht gerollt wurden.
 // Win-Count wird GLOBAL über alle Items innerhalb von 48h gezählt (aus Tabelle `winners`).
 
 export const id = "roll-all";
@@ -21,13 +21,26 @@ const medal = (i) => (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "
 export async function run(ctx) {
   const guildId = ctx.guildId;
 
-  // Alle offenen Items der letzten 48h – Name kommt aus item_name_first
+  // Alle offenen Items der letzten 48h, die NICHT in winners stehen
   const { rows: items } = await ctx.db.query(
     `
-    SELECT DISTINCT item_slug, item_name_first
-    FROM votes
-    WHERE guild_id = $1
-      AND created_at > NOW() - INTERVAL '48 hours'
+    WITH voted AS (
+      SELECT DISTINCT item_slug, item_name_first
+      FROM votes
+      WHERE guild_id = $1
+        AND created_at > NOW() - INTERVAL '48 hours'
+    ),
+    rolled AS (
+      SELECT DISTINCT item_slug
+      FROM winners
+      WHERE guild_id = $1
+        AND won_at > NOW() - INTERVAL '48 hours'
+    )
+    SELECT v.item_slug, v.item_name_first
+    FROM voted v
+    WHERE NOT EXISTS (
+      SELECT 1 FROM rolled r WHERE r.item_slug = v.item_slug
+    )
     `,
     [guildId]
   );
