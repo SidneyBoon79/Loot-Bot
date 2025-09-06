@@ -1,5 +1,4 @@
 // interactions/components/reducew-select.mjs
-// Eigenständig: kein ../lib/*, kein discord.js – nutzt pg
 import { Pool } from "pg";
 
 /* ---------- DB ---------- */
@@ -64,7 +63,14 @@ export const customId = "reducew-select";
 
 export async function run(interaction) {
   const guildId = interaction.guildId;
-  const userId = interaction.values?.[0];
+
+  // Werte robust auslesen (versch. Router/Wrapper unterstützen)
+  const userId =
+    (interaction.values && interaction.values[0]) ||
+    (interaction.data && interaction.data.values && interaction.data.values[0]) ||
+    (interaction.componentValues && interaction.componentValues[0]) ||
+    null;
+
   if (!userId) {
     return interaction.update({
       content: "Kein User ausgewählt – bitte erneut versuchen.",
@@ -77,7 +83,7 @@ export async function run(interaction) {
     `SELECT win_count
        FROM wins
       WHERE guild_id = $1
-        AND user_id = $2`,
+        AND user_id  = $2`,
     [guildId, userId]
   );
 
@@ -103,7 +109,6 @@ export async function run(interaction) {
     [guildId, userId, nextWins]
   );
 
-  // Anzeige: Mention + neuer Stand
   const mention = `<@${userId}>`;
   const comps = await buildComponents(guildId);
 
