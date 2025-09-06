@@ -4,7 +4,7 @@
 export async function run(ctx) {
   const tutorial = `# Loot-Bot – Kurz-Tutorial
 
-## 🌱 Für alle User
+## 🌱 Für alle User 
 - **/vote** – Item + Grund über Dropdown abgeben (Gründe: ⚔️ Gear > 💠 Trait > 📜 Litho)
 - **/vote-show** – Aktuelle Votes (Fenster 48h ab dem **ersten** Vote)
 - **/vote-remove** – Eigenen Vote für ein Item löschen
