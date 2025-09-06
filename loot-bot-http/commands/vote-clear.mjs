@@ -1,17 +1,11 @@
 // commands/vote-clear.mjs
-// Setzt alles zurück: votes + winners + wins (nur für Mods)
-
-import { hasModPerm } from "../services/permissions.mjs";
+// Setzt alles zurück: votes + winners + wins
 
 export const name = "vote-clear";
-export const description = "Alle Votes, Winners & Wins für diese Guild zurücksetzen (Mods)";
+export const description = "Alle Votes, Winners & Wins für diese Guild zurücksetzen";
 
 export async function run(ctx) {
   try {
-    if (!hasModPerm(ctx)) {
-      return ctx.reply("❌ Keine Berechtigung.", { ephemeral: true });
-    }
-
     const db = ctx.db;
     if (!db) {
       return ctx.reply("❌ Datenbank nicht verfügbar.", { ephemeral: true });
@@ -26,15 +20,15 @@ export async function run(ctx) {
     }
 
     await db.query("BEGIN");
-    await db.query("DELETE FROM votes    WHERE guild_id = $1", [guildId]);
-    await db.query("DELETE FROM winners  WHERE guild_id = $1", [guildId]);
-    await db.query("DELETE FROM wins     WHERE guild_id = $1", [guildId]);
+    await db.query("DELETE FROM votes   WHERE guild_id = $1", [guildId]);
+    await db.query("DELETE FROM winners WHERE guild_id = $1", [guildId]);
+    await db.query("DELETE FROM wins    WHERE guild_id = $1", [guildId]);
     await db.query("COMMIT");
 
-    return ctx.reply("🧹 Reset: Votes, Winners & Wins wurden gelöscht.", { ephemeral: true });
+    return ctx.reply("✅ Reset: Votes, Winners & Wins wurden gelöscht.", { ephemeral: true });
   } catch (e) {
     try { await ctx.db?.query("ROLLBACK"); } catch {}
-    console.error("[vote-clear] error:", e);
+    console.error("[vote-clear error]", e);
     return ctx.reply("⚠️ Fehler beim Zurücksetzen.", { ephemeral: true });
   }
 }
