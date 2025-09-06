@@ -7,7 +7,7 @@ const PRIO = { gear: 2, trait: 1, litho: 0 };
 const norm  = (x) => String(x ?? "").trim().toLowerCase();
 const emoji = (r) => ({ gear:"🗡️", trait:"💠", litho:"📜" }[String(r||"").toLowerCase()] || "❔");
 const medal = (i) => (i===0?"🥇":i===1?"🥈":i===2?"🥉":"–");
-const d100   = () => Math.floor(Math.random()*100)+1;
+const d20   = () => Math.floor(Math.random()*100)+1;
 
 function cmp(a,b){
   const g=(PRIO[b.reason]??0)-(PRIO[a.reason]??0); if(g) return g;
