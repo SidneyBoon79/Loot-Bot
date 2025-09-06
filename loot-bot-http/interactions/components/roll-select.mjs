@@ -2,7 +2,7 @@
 // Production: Log in `winners` (immer INSERT) + Upsert in `wins` (PK: guild_id, user_id).
 // Fairness (48h) wird aus `winners` gezählt. Anzeige mit 🥇/🥈/🥉 und 🏆.
 
-import { hasModPerm } from "../../services/permissions.mjs";
+// ⚠️ hasModPerm entfernt – Permissions steuerst du jetzt nur über Discord-Settings
 
 export const id = "roll-select";
 export const idStartsWith = "roll-select";
@@ -30,7 +30,6 @@ function line(e,i){
 
 export async function run(ctx){
   try{
-    if(!hasModPerm(ctx)) return ctx.reply("❌ Keine Berechtigung.", {ephemeral:true});
     const db = ctx.db;
     if(!db) return ctx.reply("❌ Datenbank nicht verfügbar.", {ephemeral:true});
 
