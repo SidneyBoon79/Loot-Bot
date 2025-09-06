@@ -75,7 +75,7 @@ export async function run(ctx) {
           ],
         },
       ],
-      ephemeral: false,
+      ephemeral: true,
     });
   } catch (e) {
     console.error("[commands/roll] error:", e);
