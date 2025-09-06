@@ -1,5 +1,4 @@
 // interactions/components/reroll-select.mjs
-import { hasModPerm } from "../../services/permissions.mjs";
 
 export const id = "reroll-select";
 export const idStartsWith = "reroll-select";
@@ -25,7 +24,6 @@ function line(e,i){
 
 export async function run(ctx){
   try{
-    if(!hasModPerm(ctx)) return ctx.reply("❌ Keine Berechtigung.", {ephemeral:true});
     const db = ctx.db;
     if(!db) return ctx.reply("❌ Datenbank nicht verfügbar.", {ephemeral:true});
 
