@@ -1,7 +1,6 @@
 // scripts/register-commands.mjs
 // Registriert alle Slash Commands bei Discord
 
-import "dotenv/config";
 import fetch from "node-fetch";
 import fs from "fs";
 
