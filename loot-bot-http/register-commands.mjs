@@ -1,49 +1,39 @@
-// scripts/register-commands.mjs
-// Registriert alle Slash Commands bei Discord
+// register-commands.mjs  — Schritt A: reducew NICHT registrieren
+import { REST, Routes } from "discord.js";
 
-import fetch from "node-fetch";
-import fs from "fs";
+import vote from "./commands/vote.mjs";
+import voteShow from "./commands/vote-show.mjs";
+import voteRemove from "./commands/vote-remove.mjs";
+import roll from "./commands/roll.mjs";
+import rollAll from "./commands/roll-all.mjs";
+import reroll from "./commands/reroll.mjs";
+import winner from "./commands/winner.mjs";
+import voteClear from "./commands/vote-clear.mjs";
+// KEIN reducew hier!
 
-const appId = process.env.APPLICATION_ID;
-const guildId = process.env.GUILD_ID;
-const token = process.env.BOT_TOKEN;
+const commands = [
+  vote,
+  voteShow,
+  voteRemove,
+  roll,
+  rollAll,
+  reroll,
+  winner,
+  voteClear,
+];
 
-async function registerCommands() {
-  const commands = [];
+const rest = new REST({ version: "10" }).setToken(process.env.BOT_TOKEN);
 
-  // Lade alle Command-Dateien aus /commands
-  const files = fs.readdirSync("./commands").filter((f) => f.endsWith(".mjs"));
-
-  for (const file of files) {
-    const { default: cmd } = await import(`../commands/${file}`);
-    if (cmd && cmd.name && cmd.description) {
-      commands.push({
-        name: cmd.name,
-        description: cmd.description,
-        type: 1, // Slash Command
-        // Wichtig: keine options mehr bei reducew
-        options: cmd.name === "reducew" ? [] : cmd.options || [],
-      });
-    }
-  }
-
-  console.log("Registriere Commands:", commands.map((c) => c.name).join(", "));
-
-  const url = `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`;
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bot ${token}`,
-    },
-    body: JSON.stringify(commands),
-  });
-
-  if (!res.ok) {
-    console.error("Fehler beim Registrieren:", await res.text());
-  } else {
-    console.log("✅ Commands registriert!");
+async function main() {
+  try {
+    console.log("Registering slash commands (ohne reducew) …");
+    await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands },
+    );
+    console.log("✅ Commands registriert (reducew deregistriert).");
+  } catch (error) {
+    console.error(error);
   }
 }
-
-registerCommands().catch(console.error);
+main();
