@@ -98,56 +98,7 @@ export async function run(ctx) {
     );
 
     if (!participants?.length) {
-      messages.push(`ℹ️ Keine Teilnehmer für **${itemName}**.`);
-      continue;
-    }
-
-    // Würfeln + sortieren
-    let rolled = participants.map((p) => ({ ...p, roll: d100() })).sort(cmpParticipant);
-    const winner = rolled[0];
-
-    // winners-Log (48h)
-    await ctx.db.query(
-      `
-      INSERT INTO winners (guild_id, item_slug, user_id, won_at, window_end_at)
-      VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '48 hours')
-      `,
-      [guildId, itemSlug, winner.user_id]
-    );
-
-    // ➕ wins upserten (globaler Zähler & Metadaten)
-    await ctx.db.query(
-      `
-      INSERT INTO wins
-        (guild_id, user_id, win_count, updated_at, item_slug, item_name_first, winner_user_id, reason, rolled_at, roll_value)
-      VALUES
-        ($1,      $2,     1,         NOW(),      $3,      $4,              $2,            $5,     NOW(),    $6)
-      ON CONFLICT (guild_id, user_id)
-      DO UPDATE SET
-        win_count       = wins.win_count + 1,
-        updated_at      = NOW(),
-        rolled_at       = NOW(),
-        item_slug       = EXCLUDED.item_slug,
-        item_name_first = EXCLUDED.item_name_first,
-        winner_user_id  = EXCLUDED.winner_user_id,
-        reason          = EXCLUDED.reason,
-        roll_value      = EXCLUDED.roll_value
-      `,
-      [guildId, winner.user_id, itemSlug, itemName, winner.reason, winner.roll]
-    );
-
-    // Aktueller Stand aus wins (für Anzeige Wx)
-    const { rows: wcount } = await ctx.db.query(
-      `SELECT win_count::int AS c FROM wins WHERE guild_id = $1 AND user_id = $2`,
-      [guildId, winner.user_id]
-    );
-    const winnerWinCount = wcount?.[0]?.c ?? 1;
-
-    const lines = rolled.map(
-      (p, i) => `${medal(i)} <@${p.user_id}> — ${emoji(p.reason)} ${p.reason} · ${p.roll} (W${p.wins})`
-    );
-
-    messages.push(
+      messages.push(
       `🎲 Roll-Ergebnis für **${itemName}**:
 ${lines.join("
 ")}
