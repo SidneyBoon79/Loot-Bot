@@ -6,7 +6,7 @@ export const id = "roll-all";
 export const description = "Würfelt alle Items gleichzeitig aus.";
 
 const d20 = () => Math.floor(Math.random() * 100) + 1;
-const PRIO = { gear: 2, trait: 1, litho: 0 };
+const PRIO = { gear: 3, trait: 2, litho: 1 }; // Gear zuerst, dann Trait, dann Litho
 const cmp = (a, b) => {
   const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
   if (g) return g;
