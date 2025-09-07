@@ -1,7 +1,7 @@
 // commands/roll-all.mjs
 // Würfelt alle offenen Items der letzten 48h aus (noch nicht gerollt).
 // Reihenfolge: Gear > Trait > Litho.
-// Speicherung ausschließlich in `wins` (Snapshot je User) per UPSERT.
+// Persistenz: UPSERT in `wins` + Insert in `winners` (für /winner-Ausgabe).
 
 export const id = "roll-all";
 export const description = "Würfelt alle Items gleichzeitig aus.";
@@ -13,7 +13,7 @@ const emoji = (r) =>
   ({ gear: "🗡️", trait: "💠", litho: "📜" }[String(r || "").toLowerCase()] || "❔");
 const medal = (i) => (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "–");
 
-// Sortierung innerhalb eines Items: Reason-Prio ↓ → WinCount ↑ → Roll ↓
+// Sort: Reason-Prio ↓ → WinCount ↑ → Roll ↓
 const cmpParticipant = (a, b) => {
   const g = (PRIO[b.reason] ?? 0) - (PRIO[a.reason] ?? 0);
   if (g) return g;
@@ -34,7 +34,7 @@ export async function run(ctx) {
       return ctx.reply("❌ Konnte die Guild-ID nicht ermitteln.", { ephemeral: true });
     }
 
-    // Alle Items der letzten 48h, die noch nicht gerollt wurden (laut wins.rolled_at)
+    // Items der letzten 48h, die noch nicht gerollt wurden (per wins.rolled_at)
     const { rows: items } = await db.query(
       `
       WITH latest AS (
@@ -81,7 +81,7 @@ export async function run(ctx) {
       const itemSlug = it.item_slug;
       const itemName = it.item_name_first ?? itemSlug;
 
-      // Teilnehmer: jüngster Vote je User + aktueller Gesamt-WinCount aus wins
+      // Teilnehmer: jüngster Vote je User + aktueller Gesamt-WinCount
       const { rows: participants } = await db.query(
         `
         WITH latest AS (
@@ -116,7 +116,7 @@ export async function run(ctx) {
 
       const winner = participants[0];
 
-      // bisherigen WinCount lesen (bei PK je User existiert max. eine Zeile)
+      // bisherigen WinCount lesen und +1 setzen
       const { rows: prevWinRows } = await db.query(
         `SELECT COALESCE(MAX(win_count), 0)::int AS wins
          FROM wins
@@ -125,7 +125,7 @@ export async function run(ctx) {
       );
       const newWinCount = (prevWinRows?.[0]?.wins ?? 0) + 1;
 
-      // UPSERT: Snapshot-Zeile je User aktualisieren
+      // UPSERT in wins
       await db.query(
         `INSERT INTO wins (
            guild_id, user_id, win_count, updated_at,
@@ -150,6 +150,14 @@ export async function run(ctx) {
           winner.reason,
           winner.roll,
         ]
+      );
+
+      // Insert in winners (für /winner-Ausgabe)
+      await db.query(
+        `INSERT INTO winners (guild_id, item_slug, user_id, won_at, window_end_at)
+         VALUES ($1,$2,$3,NOW(), NOW() + INTERVAL '48 hours')
+         ON CONFLICT DO NOTHING`,
+        [guildId, itemSlug, winner.user_id]
       );
 
       const lines = participants.map((p, i) =>
