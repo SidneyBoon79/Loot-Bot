@@ -31,24 +31,24 @@ const commands = [
   { name: "vote-remove", description: "Eigenen Vote entfernen.", type: 1 },
   { name: "vote-clear",  description: "Alle Votes zurücksetzen (Mod).", type: 1 },
 
-  { name: "roll",        description: "Roll – wähle ein Item.", type: 1 },
-  { name: "roll-all",    description: "Roll über alle Items.", type: 1 },
-  { name: "reroll",      description: "Reroll.", type: 1 },
-  { name: "winner",      description: "Aktuelle Gewinner je Item (48h).", type: 1 },
+  { name: "roll",        description: "Roll – wähle ein noch nicht gerolltes Item.", type: 1 },
+  { name: "roll-all",    description: "Rolle alle noch nicht gerolleten Items auf einmal.", type: 1 },
+  { name: "reroll",      description: "Reroll - wähle ein bereits gerolltes Item.", type: 1 },
+  { name: "winner",      description: "Aktuelle Gewinnerliste (48h).", type: 1 },
 
   // neue /reducew (ohne Options; Dropdown folgt im UI)
-  { name: "reducew",     description: "Wins reduzieren (Dropdown, -1 pro Klick).", type: 1 },
+  // { name: "reducew",     description: "Wins reduzieren (Dropdown, -1 pro Klick).", type: 1 },
 
   { name: "vote-info",   description: "Kurz-Anleitung.", type: 1 },
 
   // /changew <user> <amount> – freier Integer (negativ/positiv)
   {
     name: "changew",
-    description: "Wins anpassen (händisch Wert angeben)",
+    description: "Wins anpassen (manuelle Eingabe, Range -3 bis +3)",
     type: 1,
     options: [
       { type: 3, name: "user",   description: "User ID oder @Mention", required: true },
-      { type: 4, name: "amount", description: "Änderung der Wins (negativ oder positiv)", required: true }
+      { type: 4, name: "amount", description: "Addieren oder Subtrahieren -3 bis +3", required: true }
     ]
   }
 ];
