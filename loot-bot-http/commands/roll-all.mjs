@@ -1,4 +1,5 @@
 // commands/roll-all.mjs
+
 // Würfelt alle offenen Items der letzten 48h aus, die noch nicht gerollt wurden.
 // Reihenfolge der Items: erst Gear, dann Trait, dann Litho (basierend auf jüngstem Vote je User).
 // Win-Count wird GLOBAL aus Tabelle `wins` gezählt und dort auch inkrementiert.
@@ -9,8 +10,11 @@ export const description = "Würfelt alle Items gleichzeitig aus.";
 const d100 = () => Math.floor(Math.random() * 100) + 1; // 1–100
 const PRIO = { gear: 3, trait: 2, litho: 1 };
 
-const emoji = (r) => ({ gear: "🗡️", trait: "💠", litho: "📜" }[String(r || "").toLowerCase()] || "❔");
-const medal = (i) => (i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "–");
+const emoji = (r) => (
+  { gear: "🗡️", trait: "💠", litho: "📜" }[String(r || "").toLowerCase()] || "❔"
+);
+const medal = (i) =>
+  i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "–";
 
 // Comparator innerhalb eines Items: Gear > Trait > Litho → Wins (ASC) → Roll (DESC)
 const cmpParticipant = (a, b) => {
@@ -98,18 +102,45 @@ export async function run(ctx) {
     );
 
     if (!participants?.length) {
-      messages.push(
-      `🎲 Roll-Ergebnis für **${itemName}**:
-${lines.join("
-")}
+      messages.push(`ℹ️ Keine Teilnehmer für **${itemName}** gefunden.`);
+      continue;
+    }
 
-🏆 Gewinner: <@${winner.user_id}> — ${emoji(winner.reason)} ${winner.reason} · Wurf ${winner.roll} (W${winnerWinCount})`
+    // Würfeln & sortieren
+    for (const p of participants) {
+      p.roll = d100();
+    }
+    participants.sort(cmpParticipant);
+
+    const winner = participants[0];
+    const winnerWinCount = (winner.wins ?? 0) + 1;
+
+    // Gewinner persistieren
+    await ctx.db.query(
+      `INSERT INTO winners (guild_id, item_slug, user_id, reason, roll, won_at, item_name_first)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6)`,
+      [guildId, itemSlug, winner.user_id, winner.reason, winner.roll, itemName]
+    );
+
+    // Wins global hochzählen (UPSERT)
+    await ctx.db.query(
+      `INSERT INTO wins (guild_id, user_id, win_count)
+       VALUES ($1, $2, 1)
+       ON CONFLICT (guild_id, user_id)
+       DO UPDATE SET win_count = wins.win_count + 1`,
+      [guildId, winner.user_id]
+    );
+
+    const lines = participants.map((p, i) =>
+      `${medal(i)} <@${p.user_id}> — ${emoji(p.reason)} ${p.reason} · Wurf ${p.roll} (W${p.wins})`
+    );
+
+    messages.push(
+      `🎲 Roll-Ergebnis für **${itemName}**:\n${lines.join("\n")}\n\n🏆 Gewinner: <@${winner.user_id}> — ${emoji(winner.reason)} ${winner.reason} · Wurf ${winner.roll} (W${winnerWinCount})`
     );
   }
 
-  return ctx.reply(messages.join("
-
-"));
+  return ctx.reply(messages.join("\n\n"));
 }
 
 export default { id, description, run };
