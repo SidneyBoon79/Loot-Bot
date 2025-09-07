@@ -22,25 +22,41 @@ export async function run(ctx) {
   const guildId = ctx.guildId;
 
   // Alle offenen Items der letzten 48h, die NICHT in winners stehen
+  // und in der Reihenfolge: erst Gear, dann Trait, dann Litho (per Item-Priorität)
   const { rows: items } = await ctx.db.query(
     `
-    WITH voted AS (
-      SELECT DISTINCT item_slug, item_name_first
+    WITH latest AS (
+      -- neu: pro (item_slug, user_id) den jüngsten Vote als Grund-Basis
+      SELECT DISTINCT ON (item_slug, user_id)
+             item_slug,
+             user_id,
+             LOWER(reason) AS reason,
+             item_name_first,
+             created_at
       FROM votes
       WHERE guild_id = $1
         AND created_at > NOW() - INTERVAL '48 hours'
+      ORDER BY item_slug, user_id, created_at DESC
     ),
     rolled AS (
       SELECT DISTINCT item_slug
       FROM winners
       WHERE guild_id = $1
         AND won_at > NOW() - INTERVAL '48 hours'
+    ),
+    by_item AS (
+      SELECT
+        l.item_slug,
+        MIN(l.item_name_first) AS item_name_first,
+        MAX(CASE l.reason WHEN 'gear' THEN 3 WHEN 'trait' THEN 2 WHEN 'litho' THEN 1 ELSE 0 END)::int AS prio
+      FROM latest l
+      GROUP BY l.item_slug
     )
-    SELECT v.item_slug, v.item_name_first
-    FROM voted v
-    WHERE NOT EXISTS (
-      SELECT 1 FROM rolled r WHERE r.item_slug = v.item_slug
-    )
+    SELECT b.item_slug, b.item_name_first, b.prio
+    FROM by_item b
+    LEFT JOIN rolled r ON r.item_slug = b.item_slug
+    WHERE r.item_slug IS NULL
+    ORDER BY b.prio DESC, b.item_name_first ASC
     `,
     [guildId]
   );
