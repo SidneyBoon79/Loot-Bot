@@ -66,6 +66,7 @@ export async function routeInteraction(ctx) {
         case "roll-all":    return await rollAll.run(baseCtx);
         case "reroll":      return await reroll.run(baseCtx);
         case "reducew":     return await reducew.run(baseCtx);
+        case "changew":     return await changew.run(baseCtx);
         default:
           return ctx.reply(`Befehl **/${name}** ist noch nicht verdrahtet.`, { ephemeral: true });
       }
