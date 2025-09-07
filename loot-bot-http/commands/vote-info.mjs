@@ -20,7 +20,7 @@ Sortierung bei Rolls: **Grund** > **Wins (letzte 48h)** > **Wurfzahl**.
 
 ## 🛡️ Admin/Mods
 - **/vote-clear** – Reset (Votes, Items, Wins)
-- **/reducew** – Wins reduzieren (User auswählen + Anzahl)
+- **/changew** – Wins reduzieren oder erhöhen (User auswählen (@User) + Anzahl)
 `;
 
   await ctx.reply(tutorial, { ephemeral: true });
