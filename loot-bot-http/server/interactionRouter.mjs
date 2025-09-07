@@ -10,6 +10,7 @@ import * as roll from "../commands/roll.mjs";
 import * as rollAll from "../commands/roll-all.mjs";
 import * as reroll from "../commands/reroll.mjs";
 import * as reducew from "../commands/reducew.mjs";
+import * as changew from "../commands/changew.mjs";
 
 import { handleVoteItemAutocomplete } from "../interactions/autocomplete/vote-item.mjs";
 import { handleVoteReason } from "../interactions/components/vote-reason.mjs";
