@@ -1,99 +1,63 @@
 // server/index.mjs
 import express from "express";
 import bodyParser from "body-parser";
+import { makeCtx, reduceW, requireMod } from "../adapter.mjs";
 
-// --- kleine Helper ----------------------------------------------------------
-const toFileUrl = (rel) => new URL(rel, import.meta.url).href;
-
-/**
- * Dynamischer Modul-Loader für den Adapter.
- * Erwartet kurze Specs wie "components/xyz", "modals/abc", "autocomplete/foo"
- * oder bereits relative Pfade. Liefert default/handle oder das Modul.
- */
-async function requireMod(spec) {
-  if (!spec || typeof spec !== "string") {
-    throw new Error(`requireMod expected string, got ${typeof spec}`);
-  }
-
-  // Bereits relativer Pfad? -> übernehmen
-  let rel = spec;
-  if (!spec.startsWith("./") && !spec.startsWith("../")) {
-    // Kurzschreibweise auflösen
-    if (
-      spec.startsWith("components/") ||
-      spec.startsWith("modals/") ||
-      spec.startsWith("autocomplete/")
-    ) {
-      rel = `../interactions/${spec}`;
-    } else {
-      // Fallback: alles unter /interactions
-      rel = `../interactions/${spec}`;
-    }
-  }
-
-  // .mjs anhängen falls nicht vorhanden
-  if (!rel.endsWith(".mjs")) rel += ".mjs";
-
-  const url = toFileUrl(rel);
-  const mod = await import(url);
-  return mod.default ?? mod.handle ?? mod;
-}
-
-/**
- * Erstellt den Context, den der Adapter erwartet.
- * Wichtig: `requireMod` wird hier bereitgestellt.
- */
-function makeCtx(body, res) {
-  return {
-    body,
-    res,
-    requireMod,
-    // kleine Helpers, falls der Adapter debuggt:
-    json: (data) => res.json(data),
-    send: (data) => res.send(data),
-  };
-}
-
-// --- Express ---------------------------------------------------------------
 const app = express();
+app.use(bodyParser.json({ limit: "1mb" }));
 
-// Discord/Interactions schicken raw JSON
-app.use(bodyParser.json({ type: "*/*" }));
+// --- helper: wohin routen? ---
+function resolveSpec(ctx) {
+  const t = ctx.type;                 // Discord interaction type
+  const d = ctx.data || {};
 
-// Health
-app.get("/", (_req, res) => res.status(200).send("OK"));
+  // 2 = Application Command (Slash)
+  if (t === 2 && d.name) {
+    return `commands/${d.name}`;
+  }
 
-// --------------------------------------------------------------------------
-// Adapter laden (NICHT anfassen – wir passen uns nur an)
-import * as Adapter from "../adapter.mjs";
+  // 3 = Message Component (Button/Select)  -> custom_id
+  if (t === 3 && d.custom_id) {
+    const id = String(d.custom_id).split(":")[0]; // vor ':' alles als key
+    return `interactions/components/${id}`;
+  }
 
-// Kleiner Logger
-const log = (...a) => console.log("[INT]", ...a);
+  // 4 = Autocomplete  -> command name
+  if (t === 4 && d.name) {
+    return `interactions/autocomplete/${d.name}`;
+  }
 
-// Haupt-Route: Discord Interactions
+  // 5 = Modal Submit  -> custom_id
+  if (t === 5 && d.custom_id) {
+    const id = String(d.custom_id).split(":")[0];
+    return `interactions/modals/${id}`;
+  }
+
+  return undefined;
+}
+
+// --- Route ---
 app.post("/interactions", async (req, res) => {
   const ctx = makeCtx(req.body, res);
 
+  // make sure reduceW hat alles was es braucht
+  ctx.spec = resolveSpec(ctx);
+  ctx.requireMod = (spec) => requireMod(spec);
+
   try {
-    // Wir nehmen den vom Adapter exportierten Handler.
-    // In deinem Setup ist das "reduceW".
-    const handler =
-      Adapter.reduceW ??
-      Adapter.routeInteraction ??
-      Adapter.handle ??
-      Adapter.default;
+    // single-dispatch über reduceW
+    await reduceW(ctx, async (c) => {
+      // Modul laden und ausführen (default oder named export)
+      const mod = await c.requireMod(c.spec);
+      const fn = (mod && (mod.default || mod)) || null;
 
-    if (typeof handler !== "function") {
-      throw new Error(
-        "adapter.mjs exportiert keine passende Funktion. Erwartet z.B. reduceW/routeInteraction/handle/default."
-      );
-    }
-
-    // Direkt mit ctx aufrufen – dein reduceW nutzt ctx.requireMod.
-    await handler(ctx);
+      if (typeof fn !== "function") {
+        throw new Error(`Handler fehlt oder ist keine Funktion für "${c.spec}"`);
+      }
+      return fn(c);
+    });
   } catch (e) {
     console.error("[INT] Route Interaction Error:", e);
-    // Discord-Fehlerantwort (ephemeral)
     return res.json({
       type: 4,
       data: { content: "❌ Interner Fehler.", flags: 64 },
@@ -101,8 +65,7 @@ app.post("/interactions", async (req, res) => {
   }
 });
 
-// Railway/Render/… geben den Port per ENV vor
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
 app.listen(PORT, () => {
   console.log(`Loot-Bot-HTTP läuft auf Port ${PORT}`);
 });
