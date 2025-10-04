@@ -2,36 +2,49 @@
 import express from 'express';
 import nacl from 'tweetnacl';
 
-// -------------------------------------------------------------
-// Adapter robust laden (ESM/CJS, verschiedene Export-Namen)
-// -------------------------------------------------------------
-const pickFn = (obj, names) => names.map(n => obj?.[n]).find(v => typeof v === 'function');
+// ---------- Helper: pick first function by name ----------
+const pickFn = (obj, names) =>
+  names.map(n => (typeof obj?.[n] === 'function' ? { name: n, fn: obj[n] } : null))
+       .find(Boolean);
 
+// ---------- Load adapter robustly (ESM/CJS, named/default, any names) ----------
 async function loadAdapter() {
-  const mod = await import('../adapter.mjs');          // ESM-Import
-  const merged = { ...(mod.default || {}), ...mod };   // default + named zusammenführen
+  const mod = await import('../adapter.mjs');          // ESM import
+  const merged = { ...(mod.default || {}), ...mod };   // merge default + named
 
-  const makeCtx = pickFn(merged, ['makeCtx', 'createCtx', 'buildCtx', 'ctx']);
-  const routeInteraction = pickFn(
-    merged,
-    ['routeInteraction', 'handleInteraction', 'handle', 'route', 'dispatchInteraction']
-  );
+  // 2-stufige Variante (Kontext + Router)
+  const ctxFn =
+    pickFn(merged, ['makeCtx','createCtx','buildCtx','ctx']);
 
-  if (!makeCtx && !routeInteraction) {
+  const routerFn =
+    pickFn(merged, [
+      'routeInteraction','handleInteraction','handle','route',
+      'dispatchInteraction','onInteraction','processInteraction'
+    ]);
+
+  // 1-stufige Variante (ein einziger Handler)
+  const singleFn =
+    routerFn ||
+    pickFn(merged, [
+      'interaction','interactions','main','run','process','execute','default'
+    ]) ||
+    // als allerletztes: irgendeine Funktion am Modul nehmen
+    Object.entries(merged)
+      .filter(([,v]) => typeof v === 'function')
+      .map(([k,v]) => ({ name: k, fn: v }))[0] || null;
+
+  if (!ctxFn && !singleFn) {
     throw new Error(
-      'adapter.mjs exportiert keine passende Funktion. Erwartet z.B. makeCtx/routeInteraction oder handle/route.'
+      'adapter.mjs exportiert keine passende Funktion. Erwartet z. B. makeCtx/routeInteraction oder handle/route.'
     );
   }
-  return { makeCtx, routeInteraction };
+
+  return { ctxFn, routerFn, singleFn };
 }
 
-// -------------------------------------------------------------
-// Discord-Request-Verifier (ed25519). Erwartet RAW-Body (Buffer).
-// Mit klaren Logs, falls die Verifikation fehlschlägt.
-// -------------------------------------------------------------
+// ---------- Discord signature verification (ed25519, raw body) ----------
 function verifyDiscordRequest(publicKey) {
   const pk = Buffer.from(publicKey || '', 'hex');
-
   return (req, res, next) => {
     try {
       const signature = req.get('X-Signature-Ed25519');
@@ -46,18 +59,15 @@ function verifyDiscordRequest(publicKey) {
         return res.status(401).send('missing signature');
       }
 
-      // req.body ist Buffer dank express.raw
       const ok = nacl.sign.detached.verify(
         Buffer.from(timestamp + req.body),
         Buffer.from(signature, 'hex'),
         pk
       );
-
       if (!ok) {
         console.warn('[VERIFY] Bad signature (ed25519 verification failed).');
         return res.status(401).send('bad signature');
       }
-
       next();
     } catch (err) {
       console.error('[VERIFY] Error while verifying request:', err);
@@ -68,16 +78,13 @@ function verifyDiscordRequest(publicKey) {
 
 const app = express();
 
-// Healthcheck
+// Health
 app.get('/health', (_req, res) => res.status(200).send('OK'));
 
-// -------------------------------------------------------------
-// /interactions  (diese URL im Discord-Dev-Portal hinterlegen)
-// -------------------------------------------------------------
+// ---------- Interactions (diese URL im Dev-Portal hinterlegt) ----------
 app.post(
   '/interactions',
-  // RAW-Body, sonst bricht die Signaturprüfung
-  express.raw({ type: 'application/json' }),
+  express.raw({ type: 'application/json' }),                 // RAW body!
   verifyDiscordRequest(process.env.DISCORD_PUBLIC_KEY),
   async (req, res) => {
     // PING -> PONG
@@ -88,30 +95,34 @@ app.post(
       console.warn('[INT] invalid json body');
       return res.status(400).send('invalid json');
     }
+    if (msg?.type === 1) return res.status(200).json({ type: 1 });
 
-    if (msg?.type === 1) {
-      // Discord PING
-      return res.status(200).json({ type: 1 });
-    }
-
-    // Deine vorhandene Logik per Adapter
     try {
-      const { makeCtx, routeInteraction } = await loadAdapter();
+      const { ctxFn, routerFn, singleFn } = await loadAdapter();
 
-      if (makeCtx && routeInteraction) {
-        const ctx = makeCtx(msg, res);
-        await routeInteraction(ctx); // sollte selbst antworten
-      } else {
-        // Fallback: nur ein Handler vorhanden
-        const single = routeInteraction || makeCtx;
-        if (single.length >= 2) {
-          await single(msg, res);
-        } else {
-          await single(msg);
-          if (!res.headersSent) {
-            return res.json({ type: 4, data: { content: '✅ OK', flags: 64 } });
-          }
+      if (ctxFn && routerFn) {
+        console.log(`[INT] Using adapter ctx="${ctxFn.name}" + router="${routerFn.name}"`);
+        const ctx = ctxFn.fn(msg, res);
+        await routerFn.fn(ctx);                // Router antwortet selbst
+        if (!res.headersSent) {
+          return res.json({ type: 4, data: { content: '✅ OK', flags: 64 } });
         }
+        return;
+      }
+
+      // Single-handler Pfad
+      console.log(`[INT] Using adapter single handler="${singleFn.name}" (len=${singleFn.fn.length})`);
+      // Versuche sinnvolle Signaturen
+      if (singleFn.fn.length >= 2) {
+        await singleFn.fn(msg, res);           // (msg, res)
+      } else if (singleFn.fn.length === 1) {
+        await singleFn.fn(msg);                // (msg)
+      } else {
+        await singleFn.fn({ msg, res });       // (ctxObj)
+      }
+
+      if (!res.headersSent) {
+        return res.json({ type: 4, data: { content: '✅ OK', flags: 64 } });
       }
     } catch (e) {
       console.error('[INT] Route Interaction Error:', e);
@@ -123,11 +134,9 @@ app.post(
   }
 );
 
-// Hinweis: KEIN globales app.use(express.json()) *vor* der /interactions-Route!
+// Achtung: KEIN globales app.use(express.json()) vor /interactions!
 
-// -------------------------------------------------------------
-// Start (Railway setzt PORT; lokal Fallback 3000)
-// -------------------------------------------------------------
+// ---------- Start (Railway nutzt PORT; lokal Fallback 3000) ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Loot-Bot-HTTP läuft auf Port ${PORT}`);
