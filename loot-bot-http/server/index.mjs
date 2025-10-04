@@ -1,7 +1,22 @@
 // server/index.mjs
 import express from 'express';
 import nacl from 'tweetnacl';
-import { makeCtx, routeInteraction } from '../adapter.mjs';
+// robust: funktioniert mit named-Exports ODER default-Export-Objekt
+import * as Adapter from '../adapter.mjs';
+
+// ---- Adapter-Funktionen robust ermitteln ----
+const makeCtx =
+  Adapter.makeCtx || (Adapter.default && Adapter.default.makeCtx);
+const routeInteraction =
+  Adapter.routeInteraction ||
+  (Adapter.default && Adapter.default.routeInteraction);
+
+if (typeof makeCtx !== 'function' || typeof routeInteraction !== 'function') {
+  // Harte, klare Fehlermeldung, falls adapter.mjs wirklich andere Namen nutzt
+  throw new Error(
+    'adapter.mjs muss makeCtx und routeInteraction exportieren (named oder als default-Objekt).'
+  );
+}
 
 // ------------------------------------------------------------------
 // Discord-Request-Verifier (ed25519). Erwartet raw-Body (Buffer).
@@ -56,7 +71,7 @@ app.post(
     }
 
     try {
-      // Deine bestehende Logik unverändert
+      // unverändert deine Logik: makeCtx -> routeInteraction
       const ctx = makeCtx(msg, res);
       await routeInteraction(ctx);
     } catch (e) {
