@@ -1,5 +1,4 @@
 // server/index.mjs
-import 'dotenv/config';
 import express from 'express';
 import nacl from 'tweetnacl';
 import { makeCtx, routeInteraction } from '../adapter.mjs';
@@ -31,16 +30,16 @@ function verifyDiscordRequest(publicKey) {
 
 const app = express();
 
-// Kleiner Healthcheck (optional)
+// Optionaler Healthcheck
 app.get('/health', (_req, res) => res.status(200).send('OK'));
 
 // ------------------------------------------------------------------
-// Interactions-Route (GENAU dieser Pfad gehört ins Dev-Portal)
-// -> https://<deine-domain>.up.railway.app/interactions
+// Interactions-Route (diese URL ins Dev-Portal eintragen):
+// https://<deine-domain>.up.railway.app/interactions
 // ------------------------------------------------------------------
 app.post(
   '/interactions',
-  // WICHTIG: raw Body, damit die Signaturprüfung funktioniert
+  // RAW-Body, damit die Signaturprüfung funktioniert
   express.raw({ type: 'application/json' }),
   verifyDiscordRequest(process.env.DISCORD_PUBLIC_KEY),
   async (req, res) => {
@@ -53,13 +52,11 @@ app.post(
     }
 
     if (msg?.type === 1) {
-      // PING
       return res.status(200).json({ type: 1 });
     }
 
-    // Deine bestehende Logik (unverändert)
     try {
-      // makeCtx hat bisher den JSON-Body bekommen -> wir geben 'msg'
+      // Deine bestehende Logik unverändert
       const ctx = makeCtx(msg, res);
       await routeInteraction(ctx);
     } catch (e) {
@@ -73,14 +70,8 @@ app.post(
 );
 
 // Hinweis: KEIN globales app.use(express.json()) vor der /interactions-Route!
-// (Falls du es brauchst, hänge es NACH der obigen Route an.)
 
-// ------------------------------------------------------------------
 // Start
-// Railway setzt PORT (z.B. 8080). Lokal greift Fallback 3000.
-// In Railway "Public Networking" bitte denselben Port eintragen,
-// den die App hier ausgibt (laut Logs bei dir 8080).
-// ------------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Loot-Bot-HTTP läuft auf Port ${PORT}`);
