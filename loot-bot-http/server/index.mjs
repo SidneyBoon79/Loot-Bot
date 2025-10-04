@@ -1,33 +1,47 @@
 // server/index.mjs
+
 import express from "express";
 import bodyParser from "body-parser";
-import { makeCtx, reduceW, requireMod } from "../adapter.mjs";
+
+// Adapter robust importieren (funktioniert mit named ODER default exports)
+import * as AD from "../adapter.mjs";
+const makeCtx =
+  AD.makeCtx || AD.default?.makeCtx ||
+  ((body, res) => ({ ...body, res })); // ultra-fallback
+
+const reduceW =
+  AD.reduceW || AD.default?.reduceW ||
+  (async (ctx, fn) => fn(ctx)); // no-op fallback
+
+const _requireMod =
+  AD.requireMod || AD.default?.requireMod ||
+  (async (spec) => {
+    // Dynamischer Import relativ zu diesem File
+    const url = new URL(`../${spec}.mjs`, import.meta.url);
+    return await import(url.href);
+  });
 
 const app = express();
 app.use(bodyParser.json({ limit: "1mb" }));
 
-// --- helper: wohin routen? ---
+// ---- interaction -> Modulpfad ermitteln ----
 function resolveSpec(ctx) {
-  const t = ctx.type;                 // Discord interaction type
+  const t = ctx.type;
   const d = ctx.data || {};
 
-  // 2 = Application Command (Slash)
-  if (t === 2 && d.name) {
-    return `commands/${d.name}`;
-  }
+  // 2 = Slash Command
+  if (t === 2 && d.name) return `commands/${d.name}`;
 
-  // 3 = Message Component (Button/Select)  -> custom_id
+  // 3 = Komponenten (Buttons/Selects) -> custom_id
   if (t === 3 && d.custom_id) {
-    const id = String(d.custom_id).split(":")[0]; // vor ':' alles als key
+    const id = String(d.custom_id).split(":")[0];
     return `interactions/components/${id}`;
   }
 
-  // 4 = Autocomplete  -> command name
-  if (t === 4 && d.name) {
-    return `interactions/autocomplete/${d.name}`;
-  }
+  // 4 = Autocomplete -> command name
+  if (t === 4 && d.name) return `interactions/autocomplete/${d.name}`;
 
-  // 5 = Modal Submit  -> custom_id
+  // 5 = Modal Submit -> custom_id
   if (t === 5 && d.custom_id) {
     const id = String(d.custom_id).split(":")[0];
     return `interactions/modals/${id}`;
@@ -36,23 +50,21 @@ function resolveSpec(ctx) {
   return undefined;
 }
 
-// --- Route ---
+// ---- Route ----
 app.post("/interactions", async (req, res) => {
   const ctx = makeCtx(req.body, res);
-
-  // make sure reduceW hat alles was es braucht
   ctx.spec = resolveSpec(ctx);
-  ctx.requireMod = (spec) => requireMod(spec);
+  ctx.requireMod = (spec) => _requireMod(spec);
 
   try {
-    // single-dispatch über reduceW
     await reduceW(ctx, async (c) => {
-      // Modul laden und ausführen (default oder named export)
+      if (!c.spec) {
+        throw new Error("Keine spec ermittelbar (unknown interaction).");
+      }
       const mod = await c.requireMod(c.spec);
       const fn = (mod && (mod.default || mod)) || null;
-
       if (typeof fn !== "function") {
-        throw new Error(`Handler fehlt oder ist keine Funktion für "${c.spec}"`);
+        throw new Error(`Handler fehlt/ist keine Funktion für "${c.spec}"`);
       }
       return fn(c);
     });
