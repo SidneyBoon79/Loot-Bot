@@ -14,9 +14,24 @@ function toURL(p) {
   return pathToFileURL(path.resolve(ROOT, p)).href;
 }
 
-async function requireMod(relPath) {
-  const url = toURL(relPath);
-  return await import(url);
+async function tryImport(relPath) {
+  try {
+    return await import(toURL(relPath));
+  } catch (e) {
+    // nur weiterwerfen, wenn es kein "not found" ist
+    if (!(e?.code === "ERR_MODULE_NOT_FOUND" || /Cannot find module/.test(String(e)))) {
+      throw e;
+    }
+    return null;
+  }
+}
+
+async function importFirst(paths) {
+  for (const p of paths) {
+    const mod = await tryImport(p);
+    if (mod) return mod;
+  }
+  throw new Error(`Module not found. Tried: ${paths.join(", ")}`);
 }
 
 // robust handler picker – akzeptiert benannte Exporte oder default-Objekt
@@ -42,7 +57,7 @@ function wrapMessage(payload, opts = {}) {
   // string -> { type: 4, data:{ content }}
   if (typeof payload === "string") {
     const data = { content: payload };
-    if (opts.ephemeral) data.flags = 64;
+    if (opts?.ephemeral) data.flags = 64;
     return { type: 4, data };
   }
 
@@ -58,34 +73,10 @@ function wrapMessage(payload, opts = {}) {
   return payload;
 }
 
-/* --------- options helper: robustes Auslesen von Slash-Options ---------- */
-
-function getOptionString(data, name) {
-  if (!data) return null;
-
-  // Wir laufen alle Ebenen (Subcommand / -Groups) ab
-  const stack = [data];
-  while (stack.length) {
-    const node = stack.pop();
-    const opts = Array.isArray(node?.options) ? node.options : [];
-
-    for (const opt of opts) {
-      if (opt?.name === name && typeof opt?.value !== "undefined") {
-        return String(opt.value);
-      }
-      // 1 = SUB_COMMAND, 2 = SUB_COMMAND_GROUP
-      if (opt?.type === 1 || opt?.type === 2) {
-        stack.push(opt);
-      }
-    }
-  }
-  return null;
-}
-
 /* -------------------------------- context ------------------------------- */
 
 export function makeCtx(interaction, res) {
-  const ctx = {
+  return {
     interaction,
     res,
 
@@ -101,10 +92,9 @@ export function makeCtx(interaction, res) {
       return res.json({ type: 8, data: { choices: safe } });
     },
 
-    // für Komponenten optionales FollowUp (falls du’s brauchst)
+    // optionales FollowUp (hier ebenfalls direkter 4er Callback)
     async followUp(payload, opts) {
       const body = wrapMessage(payload, opts);
-      // Interaction Callback 4 ist ausreichend – wir nutzen hier kein Webhook
       return res.json(body);
     },
 
@@ -114,20 +104,7 @@ export function makeCtx(interaction, res) {
       const focused = Array.isArray(opts) ? opts.find((o) => o?.focused) : null;
       return focused?.value ?? null;
     },
-
-    // Slash-Options (für vote.mjs: ctx.opts.getString("item"))
-    opts: {
-      getString(name) {
-        try {
-          return getOptionString(interaction?.data, name);
-        } catch {
-          return null;
-        }
-      },
-    },
   };
-
-  return ctx;
 }
 
 /* ------------------------------- routing -------------------------------- */
@@ -136,7 +113,7 @@ async function handleCommand(ctx) {
   const name = ctx.interaction?.data?.name;
   if (!name) throw new Error("command name missing");
 
-  const mod = await requireMod(`./commands/${name}.mjs`);
+  const mod = await importFirst([`./commands/${name}.mjs`]);
   const run = pickHandler(mod, "run");
   if (typeof run !== "function") {
     throw new Error(`command '${name}': run() not found`);
@@ -145,16 +122,17 @@ async function handleCommand(ctx) {
 }
 
 async function handleAutocomplete(ctx) {
-  // Wir bestimmen Handler per Command + fokussiertem Option-Name.
+  // Handler per Command + fokussiertem Option-Name.
   const cmd = ctx.interaction?.data?.name;
   const focusedOpt =
     (ctx.interaction?.data?.options || []).find((o) => o?.focused)?.name ||
     null;
 
-  // Mapping ohne andere Dateien anzufassen:
-  // /vote item  -> ./interactions/autocomplete/vote-item.mjs :: handleVoteItemAutocomplete
+  // /vote item -> ./interactions/autocomplete/vote-item.mjs :: handleVoteItemAutocomplete
   if (cmd === "vote" && focusedOpt === "item") {
-    const mod = await requireMod("./interactions/autocomplete/vote-item.mjs");
+    const mod = await importFirst([
+      "./interactions/autocomplete/vote-item.mjs",
+    ]);
     const handler = pickHandler(mod, "handleVoteItemAutocomplete");
     if (typeof handler !== "function") {
       throw new Error("Autocomplete-Handler nicht gefunden.");
@@ -162,38 +140,33 @@ async function handleAutocomplete(ctx) {
     return await handler(ctx);
   }
 
-  // Fallback: Nichts zu tun
+  // Fallback: nichts liefern
   return ctx.respond([]);
 }
 
 async function handleComponent(ctx) {
-  // Wir leiten anhand der custom_id weiter.
-  // Beispiel bei dir: "vote:grund:<…>" -> Modul ./interactions/components/vote.mjs
+  // custom_id wie "vote:grund:<...>" -> base = "vote"
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "component";
-  const mod = await requireMod(`./interactions/components/${base}.mjs`);
 
-  // Benamte Kandidaten der Handler in Components
-  const candidates = [
-    "handle",
-    "run",
-    "onSelect",
-    "select",
-    "handleSelect",
-    "execute",
-  ];
+  // Versuche mehrere mögliche Speicherorte/Dateinamen, ohne andere Dateien anzufassen
+  const mod = await importFirst([
+    `./interactions/components/${base}.mjs`,
+    `./interactions/components/${base}-select.mjs`,
+    `./ui/${base}.mjs`,
+    `./ui/components/${base}.mjs`,
+  ]);
 
+  const candidates = ["handle", "run", "onSelect", "select", "handleSelect", "execute"];
   let handler = null;
   for (const n of candidates) {
     handler = pickHandler(mod, n);
     if (typeof handler === "function") break;
   }
-
   if (typeof handler !== "function") {
     throw new Error(`Component-Handler nicht gefunden (${base}).`);
   }
 
-  // Fürs Modul: customIdParts mitgeben ist oft hilfreich
   ctx.customIdParts = cid.split(":");
   return await handler(ctx);
 }
@@ -201,7 +174,11 @@ async function handleComponent(ctx) {
 async function handleModal(ctx) {
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "modal";
-  const mod = await requireMod(`./interactions/modals/${base}.mjs`);
+
+  const mod = await importFirst([
+    `./interactions/modals/${base}.mjs`,
+    `./ui/modals/${base}.mjs`,
+  ]);
 
   const candidates = ["handle", "run", "submit", "onSubmit", "execute"];
   let handler = null;
@@ -219,24 +196,20 @@ async function handleModal(ctx) {
 export async function routeInteraction(ctx) {
   const t = ctx.interaction?.type;
 
-  // 1 = PING wird in server/index.mjs bereits beantwortet.
+  // 1 = PING wird in server/index.mjs beantwortet.
   if (t === 2) {
-    // Slash-Command
     return await handleCommand(ctx);
   }
   if (t === 4) {
-    // Autocomplete
     return await handleAutocomplete(ctx);
   }
   if (t === 3) {
-    // Message Component (Buttons / String Select)
     return await handleComponent(ctx);
   }
   if (t === 5) {
-    // Modal Submit
     return await handleModal(ctx);
   }
 
-  // Unbekannt -> Notfallantwort, verhindert Discord-Timeout
+  // Unbekannt -> Notfallantwort
   return ctx.reply("❔ Nicht unterstützte Interaktion.", { ephemeral: true });
 }
