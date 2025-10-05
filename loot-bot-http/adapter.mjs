@@ -58,33 +58,6 @@ function wrapMessage(payload, opts = {}) {
   return payload;
 }
 
-/* -------------------------- options helper (neu) ------------------------- */
-
-function findOption(options, name) {
-  if (!Array.isArray(options)) return null;
-  for (const o of options) {
-    if (o?.name === name) return o;
-    // verschachtelte Optionen (Subcommand etc.)
-    if (Array.isArray(o?.options)) {
-      const hit = findOption(o.options, name);
-      if (hit) return hit;
-    }
-  }
-  return null;
-}
-
-function makeOpts(interaction) {
-  // liefert ein kleines API wie in deinen Commands erwartet
-  return {
-    getString(name) {
-      const opt = findOption(interaction?.data?.options || [], name);
-      const v = opt?.value;
-      return typeof v === "string" ? v : null;
-    },
-    // kannst du bei Bedarf erweitern (getInteger, getBoolean, getSubcommand, …)
-  };
-}
-
 /* -------------------------------- context ------------------------------- */
 
 export function makeCtx(interaction, res) {
@@ -104,14 +77,12 @@ export function makeCtx(interaction, res) {
       return res.json({ type: 8, data: { choices: safe } });
     },
 
-    // für Komponenten optionales FollowUp
+    // für Komponenten optionales FollowUp (falls du’s brauchst)
     async followUp(payload, opts) {
       const body = wrapMessage(payload, opts);
+      // Interaction Callback 4 ist ausreichend – wir nutzen hier kein Webhook
       return res.json(body);
     },
-
-    // Optionen-API wie von deinen Commands genutzt
-    opts: makeOpts(interaction),
 
     // Hilfen
     getFocusedOptionValue() {
@@ -143,8 +114,7 @@ async function handleAutocomplete(ctx) {
     (ctx.interaction?.data?.options || []).find((o) => o?.focused)?.name ||
     null;
 
-  // Mapping ohne andere Dateien anzufassen:
-  // /vote item  -> ./interactions/autocomplete/vote-item.mjs :: handleVoteItemAutocomplete
+  // /vote item -> ./interactions/autocomplete/vote-item.mjs :: handleVoteItemAutocomplete
   if (cmd === "vote" && focusedOpt === "item") {
     const mod = await requireMod("./interactions/autocomplete/vote-item.mjs");
     const handler = pickHandler(mod, "handleVoteItemAutocomplete");
@@ -158,12 +128,26 @@ async function handleAutocomplete(ctx) {
   return ctx.respond([]);
 }
 
+async function loadComponentModule(base) {
+  // 1) Versuche ./interactions/components/<base>.mjs
+  try {
+    return await requireMod(`./interactions/components/${base}.mjs`);
+  } catch (e) {
+    // nur bei "Modul nicht gefunden" auf index.fallen
+    if (String(e?.code) !== "ERR_MODULE_NOT_FOUND") throw e;
+  }
+  // 2) Fallback: ./interactions/components/index.mjs
+  return await requireMod(`./interactions/components/index.mjs`);
+}
+
 async function handleComponent(ctx) {
   // Wir leiten anhand der custom_id weiter.
-  // Beispiel bei dir: "vote:grund:<…>" -> Modul ./interactions/components/vote.mjs
+  // Beispiel: "vote:grund:<…>" -> bevorzugt ./interactions/components/vote.mjs
+  // Wenn es das nicht gibt, fällt es auf ./interactions/components/index.mjs zurück.
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "component";
-  const mod = await requireMod(`./interactions/components/${base}.mjs`);
+
+  const mod = await loadComponentModule(base);
 
   // Benamte Kandidaten der Handler in Components
   const candidates = [
@@ -193,7 +177,15 @@ async function handleComponent(ctx) {
 async function handleModal(ctx) {
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "modal";
-  const mod = await requireMod(`./interactions/modals/${base}.mjs`);
+
+  // analog zu Components ebenfalls mit Fallback auf index.mjs
+  let mod;
+  try {
+    mod = await requireMod(`./interactions/modals/${base}.mjs`);
+  } catch (e) {
+    if (String(e?.code) !== "ERR_MODULE_NOT_FOUND") throw e;
+    mod = await requireMod(`./interactions/modals/index.mjs`);
+  }
 
   const candidates = ["handle", "run", "submit", "onSubmit", "execute"];
   let handler = null;
