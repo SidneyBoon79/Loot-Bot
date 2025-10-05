@@ -1,23 +1,21 @@
-// interactions/autocomplete/vote-item.mjs – FINAL v3
-// Lädt /app/data/items.json (relativ zu process.cwd()) und liefert bis zu 25 Choices.
+// interactions/autocomplete/vote-item.mjs – FINAL
 
-import fs from 'fs';
-import path from 'path';
+import fs from "fs";
+import path from "path";
 
-// Einmaliger Lazy-Cache
 let CATALOG = null;
 
 function loadCatalog() {
   if (CATALOG) return CATALOG;
   try {
-    const p = path.resolve(process.cwd(), 'data', 'items.json');
-    const raw = fs.readFileSync(p, 'utf8');
+    const p = path.resolve(process.cwd(), "data", "items.json");
+    const raw = fs.readFileSync(p, "utf8");
     const json = JSON.parse(raw);
     CATALOG = (Array.isArray(json) ? json : [])
-      .map(x => (typeof x === 'string' ? x : (x && typeof x.name === 'string') ? x.name : null))
+      .map(x => (typeof x === "string" ? x : (x && typeof x.name === "string") ? x.name : null))
       .filter(Boolean);
   } catch (e) {
-    console.error('[autocomplete/vote-item] items.json laden fehlgeschlagen:', e);
+    console.error("[autocomplete/vote-item] items.json laden fehlgeschlagen:", e);
     CATALOG = [];
   }
   return CATALOG;
@@ -39,10 +37,9 @@ function search(q) {
   return [...starts, ...contains].slice(0, 25);
 }
 
-// Fallback: direkt aus der Interaction lesen, falls ctx.getFocusedOptionValue fehlt
 function getFocused(ctx) {
   try {
-    if (typeof ctx.getFocusedOptionValue === 'function') return ctx.getFocusedOptionValue();
+    if (typeof ctx.getFocusedOptionValue === "function") return ctx.getFocusedOptionValue();
     const opts = ctx?.interaction?.data?.options || [];
     const f = Array.isArray(opts) ? opts.find(o => o?.focused) : null;
     return f?.value ?? null;
@@ -51,6 +48,7 @@ function getFocused(ctx) {
   }
 }
 
+// >>> Benannter Export, damit index.mjs `import { handleVoteItemAutocomplete } ...` findet
 export async function handleVoteItemAutocomplete(ctx) {
   try {
     const q = getFocused(ctx);
@@ -58,10 +56,7 @@ export async function handleVoteItemAutocomplete(ctx) {
     const choices = results.map(name => ({ name, value: name })).slice(0, 25);
     return ctx.respond(choices);
   } catch (e) {
-    console.error('[autocomplete/vote-item] handler error:', e);
+    console.error("[autocomplete/vote-item] handler error:", e);
     return ctx.respond([]);
   }
 }
-
-// WICHTIG: named export (kein default-Objekt!)
-export { handleVoteItemAutocomplete as default } // optional, falls irgendwo default erwartet wird
