@@ -1,109 +1,208 @@
-// adapter.mjs — zentraler Router & Context-Helfer
+// adapter.mjs – resilient router for commands, autocomplete & components
+// Exports: makeCtx, routeInteraction
+// Keine Änderungen an anderen Dateien notwendig.
 
-function normalizeData(payload, opts = {}) {
-  // Strings in Discord-Datenobjekt verwandeln
-  const data = typeof payload === 'string' ? { content: payload } : { ...payload };
-  if (opts.ephemeral) {
-    data.flags = (data.flags ?? 0) | 64; // EPHEMERAL
-  }
-  return data;
+import fs from "fs";
+import path from "path";
+import { pathToFileURL } from "url";
+
+/* -------------------------------- helpers ------------------------------- */
+
+const ROOT = process.cwd();
+
+function toURL(p) {
+  return pathToFileURL(path.resolve(ROOT, p)).href;
 }
 
-export function makeCtx(body, res) {
-  const ctx = {
-    interaction: body,
+async function requireMod(relPath) {
+  const url = toURL(relPath);
+  return await import(url);
+}
+
+// robust handler picker – akzeptiert benannte Exporte oder default-Objekt
+function pickHandler(mod, name) {
+  let h = (name && mod?.[name]) || mod?.default;
+
+  // default kann ein Objekt sein -> benannte Funktion daraus wählen
+  if (typeof h === "object" && h && name && typeof h[name] === "function") {
+    h = h[name];
+  }
+
+  // Fallback: Es gibt genau eine Funktion im Modul? Dann nimm die.
+  if (typeof h !== "function") {
+    const fns = Object.values(mod || {}).filter((v) => typeof v === "function");
+    if (fns.length === 1) h = fns[0];
+  }
+
+  return h;
+}
+
+// Discord response builder
+function wrapMessage(payload, opts = {}) {
+  // string -> { type: 4, data:{ content }}
+  if (typeof payload === "string") {
+    const data = { content: payload };
+    if (opts.ephemeral) data.flags = 64;
+    return { type: 4, data };
+  }
+
+  // { content, components, embeds, ephemeral }
+  if (payload && typeof payload === "object" && !("type" in payload)) {
+    const { ephemeral, ...rest } = payload;
+    const data = { ...rest };
+    if (ephemeral) data.flags = 64;
+    return { type: 4, data };
+  }
+
+  // schon fertig strukturiert
+  return payload;
+}
+
+/* -------------------------------- context ------------------------------- */
+
+export function makeCtx(interaction, res) {
+  return {
+    interaction,
     res,
 
-    // Optionen bequem lesen (Slash-Command)
-    opts: {
-      getString(name) {
-        const opt = body?.data?.options?.find(o => o?.name === name);
-        return opt?.value ?? null;
-      },
+    // Slash-Command Antwort
+    async reply(payload, opts) {
+      const body = wrapMessage(payload, opts);
+      return res.json(body);
     },
 
-    // Focused Option Value (Autocomplete)
+    // für Autocomplete: Array<{name,value}>
+    async respond(choices) {
+      const safe = Array.isArray(choices) ? choices.slice(0, 25) : [];
+      return res.json({ type: 8, data: { choices: safe } });
+    },
+
+    // für Komponenten optionales FollowUp (falls du’s brauchst)
+    async followUp(payload, opts) {
+      const body = wrapMessage(payload, opts);
+      // Interaction Callback 4 ist ausreichend – wir nutzen hier kein Webhook
+      return res.json(body);
+    },
+
+    // Hilfen
     getFocusedOptionValue() {
-      const focused = body?.data?.options?.find(o => o?.focused);
+      const opts = interaction?.data?.options || [];
+      const focused = Array.isArray(opts) ? opts.find((o) => o?.focused) : null;
       return focused?.value ?? null;
     },
-
-    // Antwort (normal)
-    async reply(payload, opts) {
-      const data = normalizeData(payload, opts);
-      return res.json({ type: 4, data });
-    },
-
-    // Antwort (Autocomplete)
-    async respond(choices = []) {
-      // choices: [{ name, value }, ...]
-      return res.json({
-        type: 8, // APPLICATION_COMMAND_AUTOCOMPLETE_RESULT
-        data: { choices },
-      });
-    },
-
-    // Für Komponenten nützlich
-    get customId() {
-      return body?.data?.custom_id ?? '';
-    },
   };
-
-  return ctx;
 }
 
-// ---- dynamisches Laden eines Moduls mit tolerantem Export-Namen
-async function requireMod(spec) {
-  const mod = await import(spec);
-  // Versuche übliche Exportnamen, fallback auf default
-  return (
-    mod.run ||
-    mod.handle ||
-    mod.execute ||
-    mod.onSelect ||
-    mod.default
-  );
+/* ------------------------------- routing -------------------------------- */
+
+async function handleCommand(ctx) {
+  const name = ctx.interaction?.data?.name;
+  if (!name) throw new Error("command name missing");
+
+  const mod = await requireMod(`./commands/${name}.mjs`);
+  const run = pickHandler(mod, "run");
+  if (typeof run !== "function") {
+    throw new Error(`command '${name}': run() not found`);
+  }
+  return await run(ctx);
 }
 
-// ---- Router
+async function handleAutocomplete(ctx) {
+  // Wir bestimmen Handler per Command + fokussiertem Option-Name.
+  const cmd = ctx.interaction?.data?.name;
+  const focusedOpt =
+    (ctx.interaction?.data?.options || []).find((o) => o?.focused)?.name ||
+    null;
+
+  // Mapping ohne andere Dateien anzufassen:
+  // /vote item  -> ./interactions/autocomplete/vote-item.mjs :: handleVoteItemAutocomplete
+  // (weitere Fälle kannst du hier ergänzen, falls nötig)
+  if (cmd === "vote" && focusedOpt === "item") {
+    const mod = await requireMod(
+      "./interactions/autocomplete/vote-item.mjs"
+    );
+    const handler = pickHandler(mod, "handleVoteItemAutocomplete");
+    if (typeof handler !== "function") {
+      throw new Error("Autocomplete-Handler nicht gefunden.");
+    }
+    return await handler(ctx);
+  }
+
+  // Fallback: Nichts zu tun
+  return ctx.respond([]);
+}
+
+async function handleComponent(ctx) {
+  // Wir leiten anhand der custom_id weiter.
+  // Beispiel bei dir: "vote:grund:<…>" -> Modul ./interactions/components/vote.mjs
+  const cid = String(ctx.interaction?.data?.custom_id || "");
+  const base = cid.split(":")[0] || "component";
+  const mod = await requireMod(`./interactions/components/${base}.mjs`);
+
+  // Benamte Kandidaten der Handler in Components
+  const candidates = [
+    "handle",
+    "run",
+    "onSelect",
+    "select",
+    "handleSelect",
+    "execute",
+  ];
+
+  let handler = null;
+  for (const n of candidates) {
+    handler = pickHandler(mod, n);
+    if (typeof handler === "function") break;
+  }
+
+  if (typeof handler !== "function") {
+    throw new Error(`Component-Handler nicht gefunden (${base}).`);
+  }
+
+  // Fürs Modul: customIdParts mitgeben ist oft hilfreich
+  ctx.customIdParts = cid.split(":");
+  return await handler(ctx);
+}
+
+async function handleModal(ctx) {
+  const cid = String(ctx.interaction?.data?.custom_id || "");
+  const base = cid.split(":")[0] || "modal";
+  const mod = await requireMod(`./interactions/modals/${base}.mjs`);
+
+  const candidates = ["handle", "run", "submit", "onSubmit", "execute"];
+  let handler = null;
+  for (const n of candidates) {
+    handler = pickHandler(mod, n);
+    if (typeof handler === "function") break;
+  }
+  if (typeof handler !== "function") {
+    throw new Error(`Modal-Handler nicht gefunden (${base}).`);
+  }
+  ctx.customIdParts = cid.split(":");
+  return await handler(ctx);
+}
+
 export async function routeInteraction(ctx) {
   const t = ctx.interaction?.type;
 
-  // 2 = APPLICATION_COMMAND (Slash)
+  // 1 = PING wird in server/index.mjs bereits beantwortet.
   if (t === 2) {
-    const name = ctx.interaction?.data?.name;
-    // Generisch: ./commands/<name>.mjs
-    const handler = await requireMod(`./commands/${name}.mjs`);
-    if (!handler) throw new Error(`Command-Handler fehlt: commands/${name}.mjs`);
-    return handler(ctx);
+    // Slash-Command
+    return await handleCommand(ctx);
   }
-
-  // 4 = APPLICATION_COMMAND_AUTOCOMPLETE
   if (t === 4) {
-    const cmd = ctx.interaction?.data?.name;
-    // Bei /vote Autocomplete für "item"
-    if (cmd === 'vote') {
-      const handler = await requireMod(`./interactions/autocomplete/vote-item.mjs`);
-      if (!handler) throw new Error(`Autocomplete-Handler fehlt: interactions/autocomplete/vote-item.mjs`);
-      return handler(ctx);
-    }
-    // Fallback: leere Liste
-    return ctx.respond([]);
+    // Autocomplete
+    return await handleAutocomplete(ctx);
   }
-
-  // 3 = MESSAGE_COMPONENT (Buttons / String-Select)
   if (t === 3) {
-    const id = ctx.customId || '';
-    // Grundauswahl unseres Vote-Flows: "vote:grund:<...>"
-    if (id.startsWith('vote:grund')) {
-      const handler = await requireMod(`./interactions/components/reason-select.mjs`);
-      if (!handler) throw new Error(`Component-Handler fehlt: interactions/components/reason-select.mjs`);
-      return handler(ctx);
-    }
-    // unbekannte Komponente -> höflich ignorieren
-    return ctx.reply('⚠️ Unbekannte Komponente.', { ephemeral: true });
+    // Message Component (Buttons / String Select)
+    return await handleComponent(ctx);
+  }
+  if (t === 5) {
+    // Modal Submit
+    return await handleModal(ctx);
   }
 
-  // Ping oder anderes: freundlich nicken
-  return ctx.reply('✅', { ephemeral: true });
+  // Unbekannt -> Notfallantwort, verhindert Discord-Timeout
+  return ctx.reply("❔ Nicht unterstützte Interaktion.", { ephemeral: true });
 }
