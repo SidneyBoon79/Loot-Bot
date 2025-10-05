@@ -6,11 +6,43 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ----------------- Utility / Context -----------------
+function getOptions(body) {
+  const opts = body?.data?.options;
+  return Array.isArray(opts) ? opts : [];
+}
+
+function findOptionValue(body, name) {
+  const opts = getOptions(body);
+  const opt = opts.find((o) => o?.name === name);
+  return opt?.value ?? null;
+}
+
+function getFocusedOptionValue(body) {
+  try {
+    const opts = getOptions(body);
+    const f = Array.isArray(opts) ? opts.find((o) => o?.focused) : null;
+    return f?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function makeCtx(body, res) {
   const ctx = {
     body,
     res,
     now: Date.now(),
+    // IDs & Meta
+    guildId: body?.guild_id ?? null,
+    userId: body?.member?.user?.id || body?.user?.id || null,
+    // option helpers (compat for commands like vote.mjs)
+    option: (name) => findOptionValue(body, name),
+    getOption: (name) => findOptionValue(body, name),
+    getString: (name) => {
+      const v = findOptionValue(body, name);
+      return typeof v === 'string' ? v : v == null ? null : String(v);
+    },
+    getFocusedOptionValue: () => getFocusedOptionValue(body),
     // einfache Antwort (optional ephemeral)
     reply: (content, { ephemeral = false } = {}) =>
       res.status(200).json({ type: 4, data: { content, flags: ephemeral ? 64 : 0 } }),
