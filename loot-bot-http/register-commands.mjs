@@ -1,114 +1,126 @@
 // register-commands.mjs
-// Registriert Slash-Commands direkt über die Discord REST API (ohne discord.js)
-// Erwartete ENV-Variablen:
-//   BOT_TOKEN   = Bot Token (Beginnend mit "mfa." NICHT verwenden – nimm das Bot-Token)
-//   CLIENT_ID   = Application (Bot) ID
-// Optional:
-//   GUILD_ID    = Wenn gesetzt -> nur Gildenscope, sonst global
-//
-// Aufruf auf Railway (Start Command oder einmalig in der Shell):
-//   node register-commands.mjs
+// Registriert globale Slash-Commands via Discord REST (ohne discord.js)
 
-const API_BASE = "https://discord.com/api/v10";
+import { pathToFileURL } from "url";
+import path from "path";
+import fs from "fs";
 
-function env(name, required = true) {
-  const v = process.env[name];
-  if (!v && required) {
-    console.error(`[REG] Umgebungsvariable ${name} fehlt.`);
-    process.exit(1);
-  }
-  return v;
+const BOT_TOKEN  = process.env.BOT_TOKEN  || process.env.DISCORD_BOT_TOKEN;
+const CLIENT_ID  = process.env.CLIENT_ID  || process.env.DISCORD_CLIENT_ID;
+
+if (!BOT_TOKEN || !CLIENT_ID) {
+  console.error("[REG] BOT_TOKEN und CLIENT_ID (oder DISCORD_*) müssen gesetzt sein.");
+  process.exit(1);
 }
 
-const BOT_TOKEN = env("BOT_TOKEN");
-const CLIENT_ID = env("CLIENT_ID");
-const GUILD_ID = process.env.GUILD_ID || null;
+const ROOT = process.cwd();
+const API = "https://discord.com/api/v10";
+const URL_COMMANDS = `${API}/applications/${CLIENT_ID}/commands`;
 
-async function discordFetch(method, path, body) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: {
-      "Authorization": `Bot ${BOT_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`[REG] HTTP ${res.status} ${res.statusText} for ${path}\n${text}`);
-  }
-  return res.json().catch(() => ({}));
+// ---------- helpers ----------
+function toURL(rel) {
+  return pathToFileURL(path.resolve(ROOT, rel)).href;
 }
 
-// ---------- Commands-Definitionen (JSON) ----------
+async function tryImport(relPath) {
+  try {
+    const full = path.resolve(ROOT, relPath);
+    if (!fs.existsSync(full)) return null;
+    return await import(toURL(relPath));
+  } catch {
+    return null;
+  }
+}
 
-// /vote  (item Autocomplete, reason Auswahl)
-const vote = {
-  name: "vote",
-  description: "Run vote",
-  type: 1,
-  options: [
-    {
-      type: 3, // STRING
-      name: "item",
-      description: "Welches Item?",
-      required: true,
-      autocomplete: true,
-    },
-    {
-      type: 3, // STRING
-      name: "reason",
-      description: "Grund der Stimme",
-      required: false,
-      choices: [
-        { name: "⚔️ Gear",  value: "Gear"  },
-        { name: "🔷 Trait", value: "Trait" },
-        { name: "📜 Litho", value: "Litho" },
-      ],
-    },
-  ],
+function pickDefinition(mod, fallback) {
+  if (!mod) return fallback;
+  const def =
+    mod.data ||
+    mod.command ||
+    (mod.default && (mod.default.data || mod.default.command));
+  return def ?? fallback;
+}
+
+// ---------- fallbacks (nur wenn Modul nichts exportiert) ----------
+const FALLBACKS = {
+  vote: {
+    name: "vote",
+    description: "Run vote",
+    type: 1,
+    options: [
+      { name: "item", description: "Welches Item?", type: 3, required: true, autocomplete: true },
+      { name: "reason", description: "Grund der Stimme", type: 3, required: false,
+        choices: [{ name: "Gear", value: "Gear" }, { name: "Trait", value: "Trait" }, { name: "Litho", value: "Litho" }] }
+    ]
+  },
+  "vote-show":   { name: "vote-show",   description: "Aktuelle Votes anzeigen", type: 1 },
+  "vote-remove": { name: "vote-remove", description: "Eigenen Vote löschen",    type: 1 },
+  roll:          { name: "roll",        description: "Roll durch Mods für ein Item", type: 1 },
+  "roll-all":    { name: "roll-all",    description: "Rollt alle nicht-gerollten Items", type: 1 },
+  reroll:        { name: "reroll",      description: "Erneuter Roll für bereits gerollte Items", type: 1 },
+  winner:        { name: "winner",      description: "Listet Gewinner kompakt", type: 1 },
+  "vote-clear":  { name: "vote-clear",  description: "Reset (Votes, Items, Wins)", type: 1 },
+  changew:       { name: "changew",     description: "Wins reduzieren/erhöhen", type: 1 },
+  "vote-info":   { name: "vote-info",   description: "Kurz-Tutorial anzeigen (ephemeral)", type: 1 },
 };
 
-// die restlichen Commands so minimal wie zuvor – Beschreibungen anpassen, falls gewünscht
-const voteShow   = { name: "vote-show",   description: "Aktuelle Votes anzeigen", type: 1 };
-const voteRemove = { name: "vote-remove", description: "Eigenen Vote entfernen",  type: 1 };
-const voteClear  = { name: "vote-clear",  description: "Reset (Votes, Items, Wins)", type: 1 };
-
-const roll    = { name: "roll",     description: "Mods rollen ein Item",            type: 1 };
-const rollAll = { name: "roll-all", description: "Rollen alle nicht gerollten Items", type: 1 };
-const reroll  = { name: "reroll",   description: "Erlaubt erneuten Roll für Items", type: 1 };
-
-const winner  = { name: "winner",   description: "Listet Gewinner kompakt",        type: 1 };
-
-// „reducew“ wird NICHT registriert (bewusst weggelassen)
-
-// Alle zu registrierenden Commands:
-const COMMANDS = [
-  vote,
-  voteShow,
-  voteRemove,
-  roll,
-  rollAll,
-  reroll,
-  winner,
-  voteClear,
+// ---------- Dateien, die registriert werden (ohne reducew.mjs) ----------
+const FILES = [
+  "./commands/vote.mjs",
+  "./commands/vote-show.mjs",
+  "./commands/vote-remove.mjs",
+  "./commands/roll.mjs",
+  "./commands/roll-all.mjs",
+  "./commands/reroll.mjs",
+  "./commands/winner.mjs",
+  "./commands/vote-clear.mjs",
+  "./commands/changew.mjs",
+  "./commands/vote-info.mjs",   // <- jetzt dabei
 ];
 
-// ---------- Registrierung ausführen ----------
+async function buildCommands() {
+  const out = [];
+  for (const rel of FILES) {
+    const base = path.basename(rel, ".mjs");
+    const mod = await tryImport(rel);
+    const def = pickDefinition(mod, FALLBACKS[base]);
 
-async function main() {
-  try {
-    const scopePath = GUILD_ID
-      ? `/applications/${CLIENT_ID}/guilds/${GUILD_ID}/commands`
-      : `/applications/${CLIENT_ID}/commands`;
-
-    console.log(`[REG] Registriere ${COMMANDS.length} Commands ${GUILD_ID ? `(Guild ${GUILD_ID})` : "(global)"} …`);
-    const result = await discordFetch("PUT", scopePath, COMMANDS);
-    console.log(`[REG] Erfolgreich. ${Array.isArray(result) ? result.length : 0} Commands aktiv.`);
-  } catch (err) {
-    console.error("[REG] Fehler bei der Registrierung:", err?.message || err);
-    process.exit(1);
+    if (!def) {
+      console.warn(`[REG] ⚠ Keine Definition für ${base}. Übersprungen.`);
+      continue;
+    }
+    if (!def.name) def.name = base;
+    if (!def.description) def.description = base;
+    out.push(def);
   }
+  return out;
 }
 
-main();
+async function registerGlobal(cmds) {
+  const res = await fetch(URL_COMMANDS, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bot ${BOT_TOKEN}`,
+    },
+    body: JSON.stringify(cmds),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`[REG] HTTP ${res.status}: ${text}`);
+  }
+  return await res.json();
+}
+
+(async () => {
+  try {
+    console.log("[REG] Sammle Commands …");
+    const commands = await buildCommands();
+    console.log(`[REG] Registriere ${commands.length} Commands: ${commands.map(c => c.name).join(", ")}`);
+    const result = await registerGlobal(commands);
+    console.log("[REG] ✅ Fertig. Anzahl:", Array.isArray(result) ? result.length : result);
+  } catch (e) {
+    console.error("[REG] ❌ Fehler:", e?.message || e);
+    process.exit(1);
+  }
+})();
