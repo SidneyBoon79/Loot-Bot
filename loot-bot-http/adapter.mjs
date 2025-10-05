@@ -1,4 +1,4 @@
-// adapter.mjs – resilient router for commands, autocomplete & components
+// adapter.mjs – resilient router für Commands, Autocomplete & Components
 // Exports: makeCtx, routeInteraction
 // Keine Änderungen an anderen Dateien notwendig.
 
@@ -6,7 +6,7 @@ import fs from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 
-/* -------------------------------- helpers ------------------------------- */
+/* ------------------------------ helpers -------------------------------- */
 
 const ROOT = process.cwd();
 
@@ -14,28 +14,12 @@ function toURL(p) {
   return pathToFileURL(path.resolve(ROOT, p)).href;
 }
 
-async function tryImport(relPath) {
-  try {
-    const url = toURL(relPath);
-    return await import(url);
-  } catch (e) {
-    // nur "not found" stillschweigend tolerieren
-    if (e?.code === "ERR_MODULE_NOT_FOUND") return null;
-    throw e;
-  }
-}
-
 async function requireMod(relPath) {
-  const mod = await tryImport(relPath);
-  if (!mod) {
-    const err = new Error(`Module not found: ${relPath}`);
-    err.code = "ERR_MODULE_NOT_FOUND";
-    throw err;
-  }
-  return mod;
+  const url = toURL(relPath);
+  return await import(url);
 }
 
-// robuste Handler-Wahl – akzeptiert benannte Exporte oder default-Objekt
+// Handler-Finder: akzeptiert benannte Exporte ODER default (auch Objekt)
 function pickHandler(mod, name) {
   let h = (name && mod?.[name]) || mod?.default;
 
@@ -44,7 +28,7 @@ function pickHandler(mod, name) {
     h = h[name];
   }
 
-  // Fallback: Es gibt genau eine Funktion im Modul? Dann nimm die.
+  // Fallback: gibt es GENAU eine Funktion im Modul? -> nimm die
   if (typeof h !== "function") {
     const fns = Object.values(mod || {}).filter((v) => typeof v === "function");
     if (fns.length === 1) h = fns[0];
@@ -53,7 +37,7 @@ function pickHandler(mod, name) {
   return h;
 }
 
-// Discord response builder (string/obj -> Interaction Callback)
+// Discord-Response normalisieren
 function wrapMessage(payload, opts = {}) {
   if (typeof payload === "string") {
     const data = { content: payload };
@@ -69,82 +53,41 @@ function wrapMessage(payload, opts = {}) {
   return payload;
 }
 
-/* -------------------------------- context ------------------------------- */
-
-function makeOptsAccessor(interaction) {
-  // Discord schickt options in data.options (array, ggf. verschachtelt)
-  const options = Array.isArray(interaction?.data?.options)
-    ? interaction.data.options
-    : [];
-
-  function find(name) {
-    if (!name) return null;
-    const opt = options.find((o) => o?.name === name);
-    return opt ?? null;
-  }
-
-  return {
-    get(name) {
-      return find(name)?.value ?? null;
-    },
-    getString(name) {
-      const v = find(name)?.value;
-      return typeof v === "string" ? v : v == null ? null : String(v);
-    },
-    getInteger(name) {
-      const v = find(name)?.value;
-      return Number.isInteger(v) ? v : v == null ? null : parseInt(v, 10) || null;
-    },
-    getNumber(name) {
-      const v = find(name)?.value;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
-    },
-    getBoolean(name) {
-      const v = find(name)?.value;
-      return typeof v === "boolean" ? v : null;
-    },
-    getFocusedOptionValue() {
-      const f = options.find((o) => o?.focused);
-      return f?.value ?? null;
-    },
-  };
-}
+/* -------------------------------- ctx ---------------------------------- */
 
 export function makeCtx(interaction, res) {
-  const opts = makeOptsAccessor(interaction);
-
   return {
     interaction,
     res,
-    opts, // <<<<< wichtig für /commands/vote.mjs
 
     // Slash-Command Antwort
-    async reply(payload, opt) {
-      const body = wrapMessage(payload, opt);
+    async reply(payload, opts) {
+      const body = wrapMessage(payload, opts);
       return res.json(body);
     },
 
-    // Autocomplete: Array<{name,value}>
+    // Autocomplete-Choices
     async respond(choices) {
       const safe = Array.isArray(choices) ? choices.slice(0, 25) : [];
       return res.json({ type: 8, data: { choices: safe } });
     },
 
-    // optionaler FollowUp (wir antworten weiterhin mit type 4)
-    async followUp(payload, opt) {
-      const body = wrapMessage(payload, opt);
+    // optionales FollowUp (wir nutzen hier ebenfalls Callback 4)
+    async followUp(payload, opts) {
+      const body = wrapMessage(payload, opts);
       return res.json(body);
     },
 
-    // Kompatibles Helper-API für alte Aufrufe
+    // kleine Hilfe
     getFocusedOptionValue() {
-      return opts.getFocusedOptionValue();
+      const opts = interaction?.data?.options || [];
+      const focused = Array.isArray(opts) ? opts.find((o) => o?.focused) : null;
+      return focused?.value ?? null;
     },
   };
 }
 
-/* ------------------------------- routing -------------------------------- */
+/* ------------------------------- routing ------------------------------- */
 
 async function handleCommand(ctx) {
   const name = ctx.interaction?.data?.name;
@@ -159,18 +102,14 @@ async function handleCommand(ctx) {
 }
 
 async function handleAutocomplete(ctx) {
-  // Command + fokussierte Option bestimmen
   const cmd = ctx.interaction?.data?.name;
   const focused =
     (ctx.interaction?.data?.options || []).find((o) => o?.focused)?.name ||
     null;
 
-  // explizites Mapping, ohne andere Dateien zu ändern:
+  // explizites Mapping ohne andere Dateien zu ändern
   if (cmd === "vote" && focused === "item") {
-    // prefer vote-item.mjs
-    const mod =
-      (await tryImport("./interactions/autocomplete/vote-item.mjs")) ||
-      (await requireMod("./interactions/autocomplete/vote.mjs")); // Fallback auf historischen Namen
+    const mod = await requireMod("./interactions/autocomplete/vote-item.mjs");
     const handler = pickHandler(mod, "handleVoteItemAutocomplete");
     if (typeof handler !== "function") {
       throw new Error("Autocomplete-Handler nicht gefunden.");
@@ -178,29 +117,34 @@ async function handleAutocomplete(ctx) {
     return await handler(ctx);
   }
 
-  // nichts Bekanntes -> leere Liste
+  // Fallback: leer
   return ctx.respond([]);
 }
 
 async function handleComponent(ctx) {
-  // custom_id z.B. "vote:grund:<payload>"
+  // custom_id z.B. "vote:grund:...."
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "component";
 
-  // 1) spezifisches Modul versuchen
-  let mod = await tryImport(`./interactions/components/${base}.mjs`);
+  // 1) ZUERST zentralen Dispatcher probieren: interactions/components/index.mjs
+  try {
+    const central = await requireMod("./interactions/components/index.mjs");
+    const centralHandler =
+      pickHandler(central, "route") ||
+      pickHandler(central, "handle") ||
+      pickHandler(central, "run") ||
+      pickHandler(central, "onComponent");
 
-  // 2) Fallback auf zentrales components/index.mjs, wenn vorhanden
-  if (!mod) {
-    mod = await tryImport("./interactions/components/index.mjs");
-  }
-  if (!mod) {
-    throw new Error(
-      `Component-Handler Modul nicht gefunden (versucht: interactions/components/${base}.mjs und components/index.mjs).`
-    );
+    if (typeof centralHandler === "function") {
+      ctx.customIdParts = cid.split(":");
+      return await centralHandler(ctx);
+    }
+  } catch {
+    // kein zentrales index.mjs vorhanden -> weiter zum Fallback
   }
 
-  // mögliche Handler-Namen
+  // 2) Fallback: spezifisches Modul anhand des ersten Segments
+  const mod = await requireMod(`./interactions/components/${base}.mjs`);
   const candidates = [
     "handle",
     "run",
@@ -208,15 +152,12 @@ async function handleComponent(ctx) {
     "select",
     "handleSelect",
     "execute",
-    "component", // falls index ein Objekt mit .component hat
   ];
-
   let handler = null;
   for (const n of candidates) {
     handler = pickHandler(mod, n);
     if (typeof handler === "function") break;
   }
-
   if (typeof handler !== "function") {
     throw new Error(`Component-Handler nicht gefunden (${base}).`);
   }
@@ -229,14 +170,23 @@ async function handleModal(ctx) {
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "modal";
 
-  let mod = await tryImport(`./interactions/modals/${base}.mjs`);
-  if (!mod) mod = await tryImport("./interactions/modals/index.mjs");
-  if (!mod) {
-    throw new Error(
-      `Modal-Handler Modul nicht gefunden (versucht: interactions/modals/${base}.mjs und modals/index.mjs).`
-    );
-  }
+  // analog zu Components
+  try {
+    const central = await requireMod("./interactions/modals/index.mjs");
+    const centralHandler =
+      pickHandler(central, "route") ||
+      pickHandler(central, "handle") ||
+      pickHandler(central, "run") ||
+      pickHandler(central, "onSubmit") ||
+      pickHandler(central, "submit");
 
+    if (typeof centralHandler === "function") {
+      ctx.customIdParts = cid.split(":");
+      return await centralHandler(ctx);
+    }
+  } catch {}
+
+  const mod = await requireMod(`./interactions/modals/${base}.mjs`);
   const candidates = ["handle", "run", "submit", "onSubmit", "execute"];
   let handler = null;
   for (const n of candidates) {
@@ -251,14 +201,19 @@ async function handleModal(ctx) {
 }
 
 export async function routeInteraction(ctx) {
-  const t = ctx.interaction?.type;
+  try {
+    const t = ctx.interaction?.type;
 
-  // 1 = PING wird in server/index.mjs beantwortet
-  if (t === 2) return await handleCommand(ctx);      // Slash-Command
-  if (t === 4) return await handleAutocomplete(ctx); // Autocomplete
-  if (t === 3) return await handleComponent(ctx);    // Message Component
-  if (t === 5) return await handleModal(ctx);        // Modal Submit
+    // 1 = PING wird in server/index.mjs schon behandelt
+    if (t === 2) return await handleCommand(ctx);      // Slash-Command
+    if (t === 4) return await handleAutocomplete(ctx); // Autocomplete
+    if (t === 3) return await handleComponent(ctx);    // Component
+    if (t === 5) return await handleModal(ctx);        // Modal
 
-  // Notfallantwort, verhindert Timeout
-  return ctx.reply("❔ Nicht unterstützte Interaktion.", { ephemeral: true });
+    return ctx.reply("❔ Nicht unterstützte Interaktion.", { ephemeral: true });
+  } catch (e) {
+    console.error("[INT] Route Interaction Error:", e);
+    // sichere Fehlermeldung an den User
+    return ctx.reply("❌ Interner Fehler.", { ephemeral: true });
+  }
 }
