@@ -1,5 +1,6 @@
 // adapter.mjs – resilient router for commands, autocomplete & components
 // Exports: makeCtx, routeInteraction
+// Keine Änderungen an anderen Dateien notwendig.
 
 import fs from "fs";
 import path from "path";
@@ -8,26 +9,21 @@ import { pathToFileURL } from "url";
 /* -------------------------------- helpers ------------------------------- */
 
 const ROOT = process.cwd();
+const toURL = (p) => pathToFileURL(path.resolve(ROOT, p)).href;
+const requireMod = async (rel) => import(toURL(rel));
 
-function toURL(p) {
-  return pathToFileURL(path.resolve(ROOT, p)).href;
-}
+const cap = (s = "") => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
 
-async function requireMod(relPath) {
-  const url = toURL(relPath);
-  return await import(url);
-}
-
-// robust handler picker – akzeptiert benannte Exporte oder default-Objekt
 function pickHandler(mod, name) {
+  // bevorzugt benannten Export
   let h = (name && mod?.[name]) || mod?.default;
 
-  // default kann ein Objekt sein -> benannte Funktion daraus wählen
+  // default kann ein Objekt mit Funktionen sein
   if (typeof h === "object" && h && name && typeof h[name] === "function") {
     h = h[name];
   }
 
-  // Fallback: genau eine Funktion im Modul? Dann nimm die.
+  // Fallback: wenn exakt 1 Funktion exportiert wird, nimm sie
   if (typeof h !== "function") {
     const fns = Object.values(mod || {}).filter((v) => typeof v === "function");
     if (fns.length === 1) h = fns[0];
@@ -43,78 +39,33 @@ function wrapMessage(payload, opts = {}) {
     if (opts.ephemeral) data.flags = 64;
     return { type: 4, data };
   }
-
   if (payload && typeof payload === "object" && !("type" in payload)) {
     const { ephemeral, ...rest } = payload;
     const data = { ...rest };
     if (ephemeral) data.flags = 64;
     return { type: 4, data };
   }
-
-  return payload; // schon fertig strukturiert
+  return payload;
 }
 
 /* -------------------------------- context ------------------------------- */
-
-function buildOpts(interaction) {
-  const list = Array.isArray(interaction?.data?.options)
-    ? interaction.data.options
-    : [];
-
-  const map = new Map(list.map((o) => [o?.name, o?.value]));
-
-  return {
-    getString(name) {
-      const v = map.get(name);
-      return v == null ? null : String(v);
-    },
-    getInteger(name) {
-      const v = map.get(name);
-      if (v == null) return null;
-      const n = Number(v);
-      return Number.isFinite(n) ? Math.trunc(n) : null;
-    },
-    getNumber(name) {
-      const v = map.get(name);
-      if (v == null) return null;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
-    },
-    getBoolean(name) {
-      const v = map.get(name);
-      if (v == null) return null;
-      if (typeof v === "boolean") return v;
-      if (typeof v === "string") return v.toLowerCase() === "true";
-      return Boolean(v);
-    },
-  };
-}
 
 export function makeCtx(interaction, res) {
   return {
     interaction,
     res,
-    opts: buildOpts(interaction),
-
-    // Slash-Command Antwort
     async reply(payload, opts) {
       const body = wrapMessage(payload, opts);
       return res.json(body);
     },
-
-    // für Autocomplete: Array<{name,value}>
     async respond(choices) {
       const safe = Array.isArray(choices) ? choices.slice(0, 25) : [];
       return res.json({ type: 8, data: { choices: safe } });
     },
-
-    // optionales FollowUp (wir beantworten hier direkt; kein Webhook nötig)
     async followUp(payload, opts) {
       const body = wrapMessage(payload, opts);
       return res.json(body);
     },
-
-    // Focused value (falls gebraucht)
     getFocusedOptionValue() {
       const opts = interaction?.data?.options || [];
       const focused = Array.isArray(opts) ? opts.find((o) => o?.focused) : null;
@@ -140,9 +91,10 @@ async function handleCommand(ctx) {
 async function handleAutocomplete(ctx) {
   const cmd = ctx.interaction?.data?.name;
   const focusedOpt =
-    (ctx.interaction?.data?.options || []).find((o) => o?.focused)?.name || null;
+    (ctx.interaction?.data?.options || []).find((o) => o?.focused)?.name ||
+    null;
 
-  // Mapping (ohne andere Dateien anzufassen)
+  // /vote item -> ./interactions/autocomplete/vote-item.mjs
   if (cmd === "vote" && focusedOpt === "item") {
     const mod = await requireMod("./interactions/autocomplete/vote-item.mjs");
     const handler = pickHandler(mod, "handleVoteItemAutocomplete");
@@ -152,55 +104,113 @@ async function handleAutocomplete(ctx) {
     return await handler(ctx);
   }
 
-  return ctx.respond([]); // Fallback
+  return ctx.respond([]);
 }
 
 async function handleComponent(ctx) {
-  // custom_id wie "vote:grund:..."
+  // custom_id Beispiel: "vote:grund:<b64>"
   const cid = String(ctx.interaction?.data?.custom_id || "");
-  const base = cid.split(":")[0] || "component";
-  const mod = await requireMod(`./interactions/components/${base}.mjs`);
+  const [baseRaw, actionRaw] = cid.split(":");
+  const base = (baseRaw || "component").trim();
+  const action = (actionRaw || "select").trim();
 
-  const candidates = ["handle", "run", "onSelect", "select", "handleSelect", "execute"];
-  let handler = null;
-  for (const n of candidates) {
-    handler = pickHandler(mod, n);
-    if (typeof handler === "function") break;
-  }
-  if (typeof handler !== "function") {
-    throw new Error(`Component-Handler nicht gefunden (${base}).`);
+  // Kandidaten-Dateien in dieser Reihenfolge probieren
+  const modulePaths = [
+    `./interactions/components/${base}.mjs`,
+    `./interactions/components/${base}-select.mjs`,
+    `./interactions/components/${base}-component.mjs`,
+    `./interactions/components/index.mjs`, // als letzter Versuch
+  ];
+
+  // Kandidaten-Funktionsnamen, abgeleitet aus base & action
+  const fnCandidates = [
+    `handle${cap(base)}${cap(action)}`, // z.B. handleVoteGrund
+    `on${cap(base)}${cap(action)}`,
+    `handle${cap(action)}`, // z.B. handleGrund
+    "handle",
+    "run",
+    "onSelect",
+    "select",
+    "execute",
+  ];
+
+  let lastError = null;
+
+  for (const rel of modulePaths) {
+    try {
+      const mod = await requireMod(rel);
+
+      // probiere die Kandidatennamen der Reihe nach
+      for (const fnName of fnCandidates) {
+        const fn = pickHandler(mod, fnName);
+        if (typeof fn === "function") {
+          ctx.customIdParts = cid.split(":");
+          return await fn(ctx);
+        }
+      }
+    } catch (e) {
+      // nur merken, weiterprobieren
+      lastError = e;
+    }
   }
 
-  ctx.customIdParts = cid.split(":");
-  return await handler(ctx);
+  // nichts gefunden -> aussagekräftiger Fehler
+  throw new Error(
+    `Component-Handler nicht gefunden (cid="${cid}", versucht: ${modulePaths.join(
+      ", "
+    )}; functions: ${fnCandidates.join(", ")})${lastError ? " – last error: " + lastError : ""
+    }`
+  );
 }
 
 async function handleModal(ctx) {
   const cid = String(ctx.interaction?.data?.custom_id || "");
-  const base = cid.split(":")[0] || "modal";
-  const mod = await requireMod(`./interactions/modals/${base}.mjs`);
+  const [baseRaw, actionRaw] = cid.split(":");
+  const base = (baseRaw || "modal").trim();
+  const action = (actionRaw || "submit").trim();
 
-  const candidates = ["handle", "run", "submit", "onSubmit", "execute"];
-  let handler = null;
-  for (const n of candidates) {
-    handler = pickHandler(mod, n);
-    if (typeof handler === "function") break;
-  }
-  if (typeof handler !== "function") {
-    throw new Error(`Modal-Handler nicht gefunden (${base})..`);
+  const modulePaths = [
+    `./interactions/modals/${base}.mjs`,
+    `./interactions/modals/${base}-modal.mjs`,
+    `./interactions/modals/index.mjs`,
+  ];
+
+  const fnCandidates = [
+    `handle${cap(base)}${cap(action)}`,
+    `on${cap(base)}${cap(action)}`,
+    `handle${cap(action)}`,
+    "handle",
+    "run",
+    "submit",
+    "onSubmit",
+    "execute",
+  ];
+
+  for (const rel of modulePaths) {
+    try {
+      const mod = await requireMod(rel);
+      for (const fnName of fnCandidates) {
+        const fn = pickHandler(mod, fnName);
+        if (typeof fn === "function") {
+          ctx.customIdParts = cid.split(":");
+          return await fn(ctx);
+        }
+      }
+    } catch {
+      /* try next */
+    }
   }
 
-  ctx.customIdParts = cid.split(":");
-  return await handler(ctx);
+  throw new Error(`Modal-Handler nicht gefunden (${cid}).`);
 }
 
 export async function routeInteraction(ctx) {
   const t = ctx.interaction?.type;
 
-  if (t === 2) return await handleCommand(ctx);      // Slash-Command
-  if (t === 4) return await handleAutocomplete(ctx); // Autocomplete
-  if (t === 3) return await handleComponent(ctx);    // Component
-  if (t === 5) return await handleModal(ctx);        // Modal
+  if (t === 2) return handleCommand(ctx);     // Slash-Command
+  if (t === 4) return handleAutocomplete(ctx); // Autocomplete
+  if (t === 3) return handleComponent(ctx);    // Components (Select/Button)
+  if (t === 5) return handleModal(ctx);        // Modal Submit
 
   return ctx.reply("❔ Nicht unterstützte Interaktion.", { ephemeral: true });
 }
