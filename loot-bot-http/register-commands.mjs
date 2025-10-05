@@ -1,26 +1,31 @@
-// register-commands.mjs
-// Registriert die Slash-Commands per Discord REST (ohne discord.js).
-// ENV: BOT_TOKEN (Pflicht), CLIENT_ID (Pflicht), optional GUILD_ID für schnelle Guild-Registration.
+// Minimaler Registrar direkt gegen die Discord REST API (ohne discord.js).
+// Erwartet ENV: DISCORD_APP_ID, DISCORD_BOT_TOKEN, optional DISCORD_GUILD_ID
 
-const API = "https://discord.com/api/v10";
+const {
+  DISCORD_APP_ID,
+  DISCORD_BOT_TOKEN,
+  DISCORD_GUILD_ID,
+} = process.env;
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID  = process.env.GUILD_ID || ""; // leer => global registrieren
-
-if (!BOT_TOKEN || !CLIENT_ID) {
-  console.error("[REG] BOT_TOKEN oder CLIENT_ID fehlt in den Env Vars.");
+if (!DISCORD_APP_ID || !DISCORD_BOT_TOKEN) {
+  console.error("❌ Setze DISCORD_APP_ID und DISCORD_BOT_TOKEN in den Env-Variablen.");
   process.exit(1);
 }
 
-// ---------------------------- Command-Definitionen ----------------------------
-// Hinweis: Falls einzelne Optionen anders heißen sollen, hier anpassen.
-// Ziel: deckt euren aktuellen Funktionsumfang ab, keine weiteren Repos/Dateien nötig.
+const API = "https://discord.com/api/v10";
+const headers = {
+  "Authorization": `Bot ${DISCORD_BOT_TOKEN}`,
+  "Content-Type": "application/json",
+};
 
+// --- Command-Definitionen ---
+// WICHTIG: /vote hat KEINE reason-Option mehr!
 const commands = [
+  // /vote
   {
     name: "vote",
-    description: "Run vote",
+    description: "Stimme für ein Item ab",
+    type: 1, // CHAT_INPUT
     options: [
       {
         type: 3, // STRING
@@ -29,120 +34,111 @@ const commands = [
         required: true,
         autocomplete: true,
       },
-      {
-        type: 3, // STRING
-        name: "reason",
-        description: "Grund der Stimme",
-        required: false,
-        choices: [
-          { name: "Gear",  value: "Gear"  },
-          { name: "Trait", value: "Trait" },
-          { name: "Litho", value: "Litho" },
-        ],
-      },
+      // KEIN reason hier! Die Grund-Auswahl kommt aus deinem Dropdown-Component.
     ],
   },
-  {
-    name: "vote-show",
-    description: "Zeigt aktuelle Votes",
-  },
-  {
-    name: "vote-remove",
-    description: "Eigenen Vote für ein Item löschen",
-    options: [
-      {
-        type: 3, // STRING
-        name: "item",
-        description: "Welches Item?",
-        required: true,
-        autocomplete: true,
-      },
-    ],
-  },
-  {
-    name: "roll",
-    description: "Rollt ein (manuell gewähltes) Item",
-  },
-  {
-    name: "roll-all",
-    description: "Rollt alle noch nicht gerollten Items",
-  },
-  {
-    name: "reroll",
-    description: "Erlaubt einen erneuten Roll für bereits gerollte Items",
-  },
-  {
-    name: "winner",
-    description: "Listet Gewinner kompakt",
-  },
-  {
-    name: "vote-clear",
-    description: "Reset (Votes, Items, Wins)",
-  },
-  {
-    name: "changew",
-    description: "Wins eines Users ändern",
-    options: [
-      {
-        type: 6, // USER
-        name: "user",
-        description: "Betroffener User",
-        required: true,
-      },
-      {
-        type: 4, // INTEGER
-        name: "amount",
-        description: "Anzahl (+/-)",
-        required: true,
-      },
-    ],
-  },
+
+  // /vote-info
   {
     name: "vote-info",
-    description: "Zeigt das Kurz-Tutorial",
+    description: "Zeigt aktuelle Stimmen (ephemeral)",
+    type: 1,
   },
+
+  // /vote-clear
+  {
+    name: "vote-clear",
+    description: "Setzt Votes/Items zurück",
+    type: 1,
+  },
+
+  // /vote-remove
+  {
+    name: "vote-remove",
+    description: "Entfernt deine Stimme",
+    type: 1,
+  },
+
+  // /vote-show
+  {
+    name: "vote-show",
+    description: "Zeigt aktuelle Votes öffentlich",
+    type: 1,
+  },
+
+  // /winner
+  {
+    name: "winner",
+    description: "Ermittelt den Gewinner",
+    type: 1,
+  },
+
+  // /roll
+  {
+    name: "roll",
+    description: "Würfelt (ein Item / Zufallszahl)",
+    type: 1,
+  },
+
+  // /roll-all
+  {
+    name: "roll-all",
+    description: "Würfelt für alle",
+    type: 1,
+  },
+
+  // /reroll
+  {
+    name: "reroll",
+    description: "Erneut würfeln",
+    type: 1,
+  },
+
+  // /changew
+  {
+    name: "changew",
+    description: "Gewichtungsänderung",
+    type: 1,
+  },
+
+  // /winner.mjs ist bereits oben als 'winner'
 ];
 
-// ---------------------------- REST Helper ------------------------------------
-async function put(path, body) {
-  const res = await fetch(`${API}${path}`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bot ${BOT_TOKEN}`,
-    },
-    body: JSON.stringify(body),
-  });
-
+// Hilfsfunktionen
+async function putJSON(url, body) {
+  const res = await fetch(url, { method: "PUT", headers, body: JSON.stringify(body) });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* ignore */ }
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`[REG] ${res.status} ${res.statusText}: ${text}`);
+    console.error(`❌ ${res.status} ${res.statusText} @ ${url}`);
+    console.error(text);
+    throw new Error("Discord API error");
   }
-  return res.json();
+  return json ?? text;
 }
 
 async function main() {
-  try {
-    const route = GUILD_ID
-      ? `/applications/${CLIENT_ID}/guilds/${GUILD_ID}/commands`
-      : `/applications/${CLIENT_ID}/commands`;
-
-    console.log(
-      `[REG] Registriere ${commands.length} Commands ` +
-        (GUILD_ID ? `guild-weit (Guild ${GUILD_ID})…` : "global …"),
-    );
-
-    const result = await put(route, commands);
-
-    // Ausgabe verkürzt, damit Railway-Logs sauber bleiben
-    console.log(
-      `[REG] OK – ${Array.isArray(result) ? result.length : "?"} Commands registriert` +
-        (GUILD_ID ? " (sofort aktiv)." : " (global, kann bis zu 1h dauern)."),
-    );
-  } catch (err) {
-    console.error("[REG] Fehler beim Registrieren:", err);
-    process.exit(1);
+  // 1) Optional: GUILD-Commands (schnell)
+  if (DISCORD_GUILD_ID) {
+    const url = `${API}/applications/${DISCORD_APP_ID}/guilds/${DISCORD_GUILD_ID}/commands`;
+    console.log("↻ Upserting GUILD commands…");
+    const out = await putJSON(url, commands);
+    console.log(`✅ Guild-Commands aktualisiert (${Array.isArray(out) ? out.length : "?"}).`);
   }
+
+  // 2) Optional (empfohlen, um alte globale 'vote' mit reason loszuwerden):
+  //    Entweder globale komplett ersetzen – ODER fürs Testing ganz weglassen.
+  //    Hier ersetzen wir sie absichtlich identisch, damit global später auch korrekt ist.
+  const urlGlobal = `${API}/applications/${DISCORD_APP_ID}/commands`;
+  console.log("↻ Upserting GLOBAL commands…");
+  const outG = await putJSON(urlGlobal, commands);
+  console.log(`✅ Global-Commands aktualisiert (${Array.isArray(outG) ? outG.length : "?"}).`);
+
+  console.log("🎉 Fertig. Slash-UI ggf. neu öffnen – bei Guild sofort, global kann dauern.");
 }
 
-main();
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
