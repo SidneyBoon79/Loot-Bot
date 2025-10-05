@@ -1,144 +1,96 @@
-// Minimaler Registrar direkt gegen die Discord REST API (ohne discord.js).
-// Erwartet ENV: DISCORD_APP_ID, DISCORD_BOT_TOKEN, optional DISCORD_GUILD_ID
+// register-commands.mjs
+// Registriert alle Slash-Commands beim Discord-API Endpoint.
+// ENV unterstützt beide Varianten: CLIENT_ID | DISCORD_APP_ID, BOT_TOKEN | DISCORD_BOT_TOKEN, GUILD_ID
 
-const {
-  DISCORD_APP_ID,
-  DISCORD_BOT_TOKEN,
-  DISCORD_GUILD_ID,
-} = process.env;
+const APP_ID =
+  process.env.CLIENT_ID ||
+  process.env.DISCORD_APP_ID ||
+  "";
+const BOT_TOKEN =
+  process.env.BOT_TOKEN ||
+  process.env.DISCORD_BOT_TOKEN ||
+  "";
+const GUILD_ID = process.env.GUILD_ID || "";
 
-if (!DISCORD_APP_ID || !DISCORD_BOT_TOKEN) {
-  console.error("❌ Setze DISCORD_APP_ID und DISCORD_BOT_TOKEN in den Env-Variablen.");
+function die(msg) {
+  console.error("✖", msg);
   process.exit(1);
 }
 
-const API = "https://discord.com/api/v10";
-const headers = {
-  "Authorization": `Bot ${DISCORD_BOT_TOKEN}`,
-  "Content-Type": "application/json",
-};
+console.log("▶ Registriere Slash Commands (ohne reason-Option) …");
+console.log("  • APP_ID :", APP_ID ? `${APP_ID.slice(0, 6)}…` : "(fehlt)");
+console.log("  • GUILD_ID:", GUILD_ID ? `${GUILD_ID.slice(0, 6)}…` : "(fehlt)");
+console.log("  • BOT_TOKEN:", BOT_TOKEN ? "vorhanden" : "(fehlt)");
 
-// --- Command-Definitionen ---
-// WICHTIG: /vote hat KEINE reason-Option mehr!
+if (!APP_ID || !BOT_TOKEN || !GUILD_ID) {
+  die("Bitte ENV setzen: CLIENT_ID/DISCORD_APP_ID, BOT_TOKEN/DISCORD_BOT_TOKEN und GUILD_ID.");
+}
+
+/* -------------------- Command-Definitionen -------------------- */
+// /vote hat NUR noch "item" (mit Autocomplete). KEINE reason-Option mehr.
 const commands = [
-  // /vote
   {
     name: "vote",
-    description: "Stimme für ein Item ab",
-    type: 1, // CHAT_INPUT
+    description: "Run vote",
+    type: 1,
     options: [
       {
-        type: 3, // STRING
         name: "item",
         description: "Welches Item?",
+        type: 3, // STRING
         required: true,
         autocomplete: true,
       },
-      // KEIN reason hier! Die Grund-Auswahl kommt aus deinem Dropdown-Component.
     ],
   },
 
-  // /vote-info
-  {
-    name: "vote-info",
-    description: "Zeigt aktuelle Stimmen (ephemeral)",
-    type: 1,
-  },
+  // weitere Commands
+  { name: "vote-info",   description: "Zeigt aktuelle Vote-Infos",   type: 1 },
+  { name: "vote-show",   description: "Zeigt die aktuellen Stimmen", type: 1 },
+  { name: "vote-clear",  description: "Löscht Votes/Items/Wins",     type: 1 },
+  { name: "vote-remove", description: "Entfernt eine Stimme",        type: 1 },
 
-  // /vote-clear
-  {
-    name: "vote-clear",
-    description: "Setzt Votes/Items zurück",
-    type: 1,
-  },
+  { name: "roll",        description: "Würfeln",                     type: 1 },
+  { name: "roll-all",    description: "Alle würfeln",                type: 1 },
+  { name: "reroll",      description: "Reroll",                      type: 1 },
+  { name: "changew",     description: "Gewichte ändern",             type: 1 },
 
-  // /vote-remove
-  {
-    name: "vote-remove",
-    description: "Entfernt deine Stimme",
-    type: 1,
-  },
-
-  // /vote-show
-  {
-    name: "vote-show",
-    description: "Zeigt aktuelle Votes öffentlich",
-    type: 1,
-  },
-
-  // /winner
-  {
-    name: "winner",
-    description: "Ermittelt den Gewinner",
-    type: 1,
-  },
-
-  // /roll
-  {
-    name: "roll",
-    description: "Würfelt (ein Item / Zufallszahl)",
-    type: 1,
-  },
-
-  // /roll-all
-  {
-    name: "roll-all",
-    description: "Würfelt für alle",
-    type: 1,
-  },
-
-  // /reroll
-  {
-    name: "reroll",
-    description: "Erneut würfeln",
-    type: 1,
-  },
-
-  // /changew
-  {
-    name: "changew",
-    description: "Gewichtungsänderung",
-    type: 1,
-  },
-
-  // /winner.mjs ist bereits oben als 'winner'
+  { name: "winner",      description: "Gewinner anzeigen",           type: 1 },
 ];
 
-// Hilfsfunktionen
-async function putJSON(url, body) {
-  const res = await fetch(url, { method: "PUT", headers, body: JSON.stringify(body) });
+/* -------------------- PUT zum Discord-API -------------------- */
+
+const apiBase = "https://discord.com/api/v10";
+const url = `${apiBase}/applications/${APP_ID}/guilds/${GUILD_ID}/commands`;
+
+const headers = {
+  "Authorization": `Bot ${BOT_TOKEN}`,
+  "Content-Type": "application/json",
+};
+
+try {
+  const res = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify(commands),
+  });
+
   const text = await res.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch { /* ignore */ }
+  let payload;
+  try { payload = JSON.parse(text); } catch { payload = text; }
+
   if (!res.ok) {
-    console.error(`❌ ${res.status} ${res.statusText} @ ${url}`);
-    console.error(text);
-    throw new Error("Discord API error");
-  }
-  return json ?? text;
-}
-
-async function main() {
-  // 1) Optional: GUILD-Commands (schnell)
-  if (DISCORD_GUILD_ID) {
-    const url = `${API}/applications/${DISCORD_APP_ID}/guilds/${DISCORD_GUILD_ID}/commands`;
-    console.log("↻ Upserting GUILD commands…");
-    const out = await putJSON(url, commands);
-    console.log(`✅ Guild-Commands aktualisiert (${Array.isArray(out) ? out.length : "?"}).`);
+    console.error("✖ Discord-API Fehler:", res.status, res.statusText);
+    console.error(payload);
+    process.exit(1);
   }
 
-  // 2) Optional (empfohlen, um alte globale 'vote' mit reason loszuwerden):
-  //    Entweder globale komplett ersetzen – ODER fürs Testing ganz weglassen.
-  //    Hier ersetzen wir sie absichtlich identisch, damit global später auch korrekt ist.
-  const urlGlobal = `${API}/applications/${DISCORD_APP_ID}/commands`;
-  console.log("↻ Upserting GLOBAL commands…");
-  const outG = await putJSON(urlGlobal, commands);
-  console.log(`✅ Global-Commands aktualisiert (${Array.isArray(outG) ? outG.length : "?"}).`);
-
-  console.log("🎉 Fertig. Slash-UI ggf. neu öffnen – bei Guild sofort, global kann dauern.");
-}
-
-main().catch((e) => {
-  console.error(e);
+  console.log("✅ Commands registriert:", Array.isArray(payload) ? payload.length : "?");
+  for (const c of payload) {
+    console.log(`  • /${c?.name} (${c?.id})`);
+  }
+  process.exit(0);
+} catch (err) {
+  console.error("✖ Netzwerk-/Laufzeitfehler beim Registrieren:", err);
   process.exit(1);
-});
+}
