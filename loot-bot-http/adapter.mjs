@@ -1,4 +1,4 @@
-// adapter.mjs – resilient router für Commands, Autocomplete & Components
+// adapter.mjs – resilient router for commands, autocomplete & components
 // Exports: makeCtx, routeInteraction
 // Keine Änderungen an anderen Dateien notwendig.
 
@@ -6,7 +6,7 @@ import fs from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 
-/* ------------------------------ helpers -------------------------------- */
+/* -------------------------------- helpers ------------------------------- */
 
 const ROOT = process.cwd();
 
@@ -19,7 +19,7 @@ async function requireMod(relPath) {
   return await import(url);
 }
 
-// Handler-Finder: akzeptiert benannte Exporte ODER default (auch Objekt)
+// robust handler picker – akzeptiert benannte Exporte oder default-Objekt
 function pickHandler(mod, name) {
   let h = (name && mod?.[name]) || mod?.default;
 
@@ -28,7 +28,7 @@ function pickHandler(mod, name) {
     h = h[name];
   }
 
-  // Fallback: gibt es GENAU eine Funktion im Modul? -> nimm die
+  // Fallback: Es gibt genau eine Funktion im Modul? Dann nimm die.
   if (typeof h !== "function") {
     const fns = Object.values(mod || {}).filter((v) => typeof v === "function");
     if (fns.length === 1) h = fns[0];
@@ -37,28 +37,80 @@ function pickHandler(mod, name) {
   return h;
 }
 
-// Discord-Response normalisieren
+// Discord response builder
 function wrapMessage(payload, opts = {}) {
+  // string -> { type: 4, data:{ content }}
   if (typeof payload === "string") {
     const data = { content: payload };
     if (opts.ephemeral) data.flags = 64;
     return { type: 4, data };
   }
+
+  // { content, components, embeds, ephemeral }
   if (payload && typeof payload === "object" && !("type" in payload)) {
     const { ephemeral, ...rest } = payload;
     const data = { ...rest };
     if (ephemeral) data.flags = 64;
     return { type: 4, data };
   }
+
+  // schon fertig strukturiert
   return payload;
 }
 
-/* -------------------------------- ctx ---------------------------------- */
+/* --------------------------- options helper (NEU) ----------------------- */
+
+function buildOptsHelper(interaction) {
+  const options = Array.isArray(interaction?.data?.options)
+    ? interaction.data.options
+    : [];
+
+  // Option-Werte in Map für schnellen Zugriff
+  const map = new Map();
+  for (const o of options) {
+    if (o && typeof o.name === "string") {
+      // bei Subcommands liegen die echten Optionen in o.options
+      if (o.type === 1 && Array.isArray(o.options)) {
+        for (const so of o.options) {
+          if (so?.name) map.set(so.name, so.value);
+        }
+      } else {
+        map.set(o.name, o.value);
+      }
+    }
+  }
+
+  return {
+    getString(name) {
+      const v = map.get(name);
+      return typeof v === "string" ? v : undefined;
+    },
+    getInteger(name) {
+      const v = map.get(name);
+      return Number.isInteger(v) ? v : undefined;
+    },
+    getNumber(name) {
+      const v = map.get(name);
+      const n = typeof v === "number" ? v : Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    },
+    getBoolean(name) {
+      const v = map.get(name);
+      return typeof v === "boolean" ? v : undefined;
+    },
+    // Minimal helpers – erweitern falls ihr weitere Typen nutzt
+  };
+}
+
+/* -------------------------------- context ------------------------------- */
 
 export function makeCtx(interaction, res) {
   return {
     interaction,
     res,
+
+    // Slash-Command Optionen im Discord.js-Stil
+    opts: buildOptsHelper(interaction),
 
     // Slash-Command Antwort
     async reply(payload, opts) {
@@ -66,19 +118,19 @@ export function makeCtx(interaction, res) {
       return res.json(body);
     },
 
-    // Autocomplete-Choices
+    // für Autocomplete: Array<{name,value}>
     async respond(choices) {
       const safe = Array.isArray(choices) ? choices.slice(0, 25) : [];
       return res.json({ type: 8, data: { choices: safe } });
     },
 
-    // optionales FollowUp (wir nutzen hier ebenfalls Callback 4)
+    // optionales FollowUp (nutzt denselben Callback 4)
     async followUp(payload, opts) {
       const body = wrapMessage(payload, opts);
       return res.json(body);
     },
 
-    // kleine Hilfe
+    // Hilfen
     getFocusedOptionValue() {
       const opts = interaction?.data?.options || [];
       const focused = Array.isArray(opts) ? opts.find((o) => o?.focused) : null;
@@ -87,7 +139,7 @@ export function makeCtx(interaction, res) {
   };
 }
 
-/* ------------------------------- routing ------------------------------- */
+/* ------------------------------- routing -------------------------------- */
 
 async function handleCommand(ctx) {
   const name = ctx.interaction?.data?.name;
@@ -102,13 +154,15 @@ async function handleCommand(ctx) {
 }
 
 async function handleAutocomplete(ctx) {
+  // Wir bestimmen Handler per Command + fokussiertem Option-Name.
   const cmd = ctx.interaction?.data?.name;
-  const focused =
+  const focusedOpt =
     (ctx.interaction?.data?.options || []).find((o) => o?.focused)?.name ||
     null;
 
-  // explizites Mapping ohne andere Dateien zu ändern
-  if (cmd === "vote" && focused === "item") {
+  // Mapping ohne andere Dateien anzufassen:
+  // /vote item -> ./interactions/autocomplete/vote-item.mjs :: handleVoteItemAutocomplete
+  if (cmd === "vote" && focusedOpt === "item") {
     const mod = await requireMod("./interactions/autocomplete/vote-item.mjs");
     const handler = pickHandler(mod, "handleVoteItemAutocomplete");
     if (typeof handler !== "function") {
@@ -117,42 +171,17 @@ async function handleAutocomplete(ctx) {
     return await handler(ctx);
   }
 
-  // Fallback: leer
+  // Fallback
   return ctx.respond([]);
 }
 
 async function handleComponent(ctx) {
-  // custom_id z.B. "vote:grund:...."
+  // custom_id z.B. "vote:grund:<…>" -> Modul ./interactions/components/vote.mjs
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "component";
-
-  // 1) ZUERST zentralen Dispatcher probieren: interactions/components/index.mjs
-  try {
-    const central = await requireMod("./interactions/components/index.mjs");
-    const centralHandler =
-      pickHandler(central, "route") ||
-      pickHandler(central, "handle") ||
-      pickHandler(central, "run") ||
-      pickHandler(central, "onComponent");
-
-    if (typeof centralHandler === "function") {
-      ctx.customIdParts = cid.split(":");
-      return await centralHandler(ctx);
-    }
-  } catch {
-    // kein zentrales index.mjs vorhanden -> weiter zum Fallback
-  }
-
-  // 2) Fallback: spezifisches Modul anhand des ersten Segments
   const mod = await requireMod(`./interactions/components/${base}.mjs`);
-  const candidates = [
-    "handle",
-    "run",
-    "onSelect",
-    "select",
-    "handleSelect",
-    "execute",
-  ];
+
+  const candidates = ["handle", "run", "onSelect", "select", "handleSelect", "execute"];
   let handler = null;
   for (const n of candidates) {
     handler = pickHandler(mod, n);
@@ -169,24 +198,8 @@ async function handleComponent(ctx) {
 async function handleModal(ctx) {
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "modal";
-
-  // analog zu Components
-  try {
-    const central = await requireMod("./interactions/modals/index.mjs");
-    const centralHandler =
-      pickHandler(central, "route") ||
-      pickHandler(central, "handle") ||
-      pickHandler(central, "run") ||
-      pickHandler(central, "onSubmit") ||
-      pickHandler(central, "submit");
-
-    if (typeof centralHandler === "function") {
-      ctx.customIdParts = cid.split(":");
-      return await centralHandler(ctx);
-    }
-  } catch {}
-
   const mod = await requireMod(`./interactions/modals/${base}.mjs`);
+
   const candidates = ["handle", "run", "submit", "onSubmit", "execute"];
   let handler = null;
   for (const n of candidates) {
@@ -201,19 +214,26 @@ async function handleModal(ctx) {
 }
 
 export async function routeInteraction(ctx) {
-  try {
-    const t = ctx.interaction?.type;
+  const t = ctx.interaction?.type;
 
-    // 1 = PING wird in server/index.mjs schon behandelt
-    if (t === 2) return await handleCommand(ctx);      // Slash-Command
-    if (t === 4) return await handleAutocomplete(ctx); // Autocomplete
-    if (t === 3) return await handleComponent(ctx);    // Component
-    if (t === 5) return await handleModal(ctx);        // Modal
-
-    return ctx.reply("❔ Nicht unterstützte Interaktion.", { ephemeral: true });
-  } catch (e) {
-    console.error("[INT] Route Interaction Error:", e);
-    // sichere Fehlermeldung an den User
-    return ctx.reply("❌ Interner Fehler.", { ephemeral: true });
+  // 1 = PING wird in server/index.mjs bereits beantwortet.
+  if (t === 2) {
+    // Slash-Command
+    return await handleCommand(ctx);
   }
+  if (t === 4) {
+    // Autocomplete
+    return await handleAutocomplete(ctx);
+  }
+  if (t === 3) {
+    // Message Component (Buttons / String Select)
+    return await handleComponent(ctx);
+  }
+  if (t === 5) {
+    // Modal Submit
+    return await handleModal(ctx);
+  }
+
+  // Unbekannt -> Notfallantwort, verhindert Discord-Timeout
+  return ctx.reply("❔ Nicht unterstützte Interaktion.", { ephemeral: true });
 }
