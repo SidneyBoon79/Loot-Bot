@@ -1,132 +1,182 @@
-// adapter.mjs – minimaler Adapter mit robuster Options-Übernahme
+// adapter.mjs — Zentrale Brücke zwischen Discord-Webhook (server/index.mjs) und deiner Bot-Logik.
+// ÄNDERN NUR HIER. Keine anderen Repo-Dateien nötig.
 
-// ---- Hilfen ---------------------------------------------------------------
+import fs from "fs";
+import path from "path";
 
-// Discord schickt options ggf. geschachtelt (Subcommands). Flach machen:
-function flattenOptions(opts) {
-  const out = {};
-  if (!Array.isArray(opts)) return out;
-  for (const o of opts) {
-    // Subcommand / SubcommandGroup
-    if (o?.options && (o.type === 1 || o.type === 2)) {
-      Object.assign(out, flattenOptions(o.options));
-      continue;
-    }
-    if (o && typeof o.name === "string" && "value" in o) {
-      out[o.name] = o.value;
+// ---- Import: dein Autocomplete-Handler (bereits vorhanden) ----
+import {
+  handleVoteItemAutocomplete
+} from "./interactions/autocomplete/vote-item.mjs";
+
+// ---- Hilfen -----------------------------------------------------
+
+function findOption(options, name) {
+  if (!Array.isArray(options)) return undefined;
+  for (const opt of options) {
+    if (opt.name === name) return opt;
+    if (Array.isArray(opt.options)) {
+      const sub = findOption(opt.options, name);
+      if (sub) return sub;
     }
   }
+  return undefined;
+}
+
+function getFocusedOptionValue(body) {
+  try {
+    const opts = body?.data?.options ?? [];
+    for (const o of opts) {
+      if (o.focused) return String(o.value ?? "");
+      if (Array.isArray(o.options)) {
+        const inner = o.options.find(x => x.focused);
+        if (inner) return String(inner.value ?? "");
+      }
+    }
+  } catch {}
+  return "";
+}
+
+function makeOptsApi(body) {
+  return {
+    getString(name) {
+      const opt = findOption(body?.data?.options ?? [], name);
+      return typeof opt?.value === "string" ? opt.value : (
+        opt?.value != null ? String(opt.value) : null
+      );
+    }
+  };
+}
+
+// ---- Context-Objekt --------------------------------------------
+
+export function makeCtx(body, res) {
+  return {
+    // Rohdaten
+    interaction: { data: body?.data, raw: body },
+
+    guildId: body?.guild_id ?? null,
+    userId:
+      body?.member?.user?.id ??
+      body?.user?.id ??
+      null,
+
+    // Options-API
+    opts: makeOptsApi(body),
+
+    // Für Autocomplete: aktuell fokussierter Input
+    getFocusedOptionValue() {
+      return getFocusedOptionValue(body);
+    },
+
+    // Discord Antworten (vereinheitlicht)
+    async reply(payload) {
+      // Strings normalisieren auf { content }
+      const data =
+        typeof payload === "string" ? { content: payload } : payload ?? {};
+
+      // type 4 (CHANNEL_MESSAGE_WITH_SOURCE) = 4, aber hier übergeben wir nur "data"
+      // server/index.mjs verpackt das bereits passend.
+      return res.json({ type: 4, data: normalizeMessage(data) });
+    },
+
+    async followUp(payload) {
+      const data =
+        typeof payload === "string" ? { content: payload } : payload ?? {};
+      // type 4 wie oben – in unserem Webhook-Kontext gibt es kein separates FollowUp,
+      // wir antworten schlicht nochmal.
+      return res.json({ type: 4, data: normalizeMessage(data) });
+    },
+
+    // Für Autocomplete (Choices)
+    async respond(choices) {
+      const arr = Array.isArray(choices) ? choices : [];
+      return res.json({
+        type: 8, // APPLICATION_COMMAND_AUTOCOMPLETE_RESULT
+        data: { choices: arr }
+      });
+    }
+  };
+}
+
+function normalizeMessage(d) {
+  // Minimal-Normalisierung
+  const out = {
+    content: d.content ?? "",
+    flags: d.ephemeral ? 64 : d.flags ?? undefined,
+    components: d.components ?? undefined,
+    embeds: d.embeds ?? undefined
+  };
+  // undefined-Felder raus
+  Object.keys(out).forEach(k => out[k] === undefined && delete out[k]);
   return out;
 }
 
-// modul dynamisch laden (relativ zur App-Struktur)
-async function requireMod(spec) {
-  // spec z.B. "commands/vote.mjs" oder "interactions/autocomplete/index.mjs"
-  const url = new URL(`./${spec}`, import.meta.url);
-  const mod = await import(url.href);
-  return mod && mod.default ? mod.default : mod;
-}
-
-// ---- Context-Erstellung ---------------------------------------------------
-
-export function makeCtx(raw, res) {
-  const type = raw?.type;                      // 1 = PING, 2 = APP_CMD, 4 = AUTOCOMPLETE, ...
-  const data = raw?.data ?? {};
-  const optionsMap = flattenOptions(data.options);
-
-  const ctx = {
-    type,
-    data,
-    guildId: raw?.guild_id ?? null,
-    userId:
-      raw?.member?.user?.id ??
-      raw?.user?.id ??
-      null,
-
-    // hier sind die wichtigen Slash-Options:
-    options: optionsMap,
-
-    // Autocomplete: aktuell fokussierter Wert, falls vorhanden
-    getFocusedOptionValue() {
-      try {
-        const focused = Array.isArray(data.options)
-          ? data.options.find(o => o?.focused)
-          : null;
-        return focused?.value ?? null;
-      } catch {
-        return null;
-      }
-    },
-
-    // Antworten
-    async reply(payload) {
-      return res.json(
-        typeof payload === "string"
-          ? { type: 4, data: { content: payload } }
-          : { type: 4, data: payload }
-      );
-    },
-
-    async respond(choices) {
-      // nur für Autocomplete (type 8 payload)
-      return res.json({
-        type: 8,
-        data: { choices: Array.isArray(choices) ? choices : [] },
-      });
-    },
-
-    // Debug-Helfer: im Zweifel einmal sehen, was tatsächlich ankommt
-    debug() {
-      try {
-        console.log("[DBG] command:", data?.name, "options:", optionsMap);
-      } catch {}
-    },
-  };
-
-  return ctx;
-}
-
-// ---- Routing --------------------------------------------------------------
+// ---- Router -----------------------------------------------------
 
 export async function routeInteraction(ctx) {
-  // PING antworten wir im Server, hier nur Commands / Autocomplete
-  if (ctx.type === 2) {
-    // Application Command
-    const name = ctx.data?.name;
-    if (!name) throw new Error("missing command name");
+  const body = ctx?.interaction?.raw ?? {};
+  const t = body?.type;
 
-    // optional: einmal debuggen (kannst du gerne entfernen)
-    ctx.debug();
-
-    // commands/<name>.mjs laden und ausführen
-    const mod = await requireMod(`commands/${name}.mjs`);
-    const run = mod?.run ?? mod?.default ?? mod;
-    if (typeof run !== "function") {
-      throw new Error(`commands/${name}.mjs exportiert keine Funktion.`);
-    }
-    return run(ctx);
+  // Ping (sollte in server/index.mjs bereits abgefangen sein)
+  if (t === 1) {
+    return ctx.reply({ content: "pong", ephemeral: true });
   }
 
-  if (ctx.type === 4) {
-    // Autocomplete – wir leiten an euren zentralen Index weiter
-    const auto = await requireMod("interactions/autocomplete/index.mjs");
-
-    // Erwartet entweder default(ctx) oder ein Mapping pro Command
-    if (typeof auto === "function") {
-      return auto(ctx);
+  // ---- Autocomplete: NUR HIER fixen, ohne andere Dateien anzufassen ----
+  if (t === 4) {
+    // Wir greifen NUR den Fall /vote item ab – alles andere ignorieren/leer
+    const commandName = body?.data?.name;
+    if (commandName === "vote") {
+      // direkt unseren vorhandenen Handler verwenden
+      try {
+        return await handleVoteItemAutocomplete(ctx);
+      } catch (e) {
+        console.error("[INT] Autocomplete handler error:", e);
+        return ctx.respond([]); // leere Liste statt Fehler
+      }
     }
-    const cmd = ctx.data?.name;
-    const handler =
-      auto?.[cmd] ||
-      auto?.default ||
-      auto?.handleVoteItemAutocomplete; // fallback, falls ihr es so genannt habt
-
-    if (typeof handler !== "function") {
-      throw new Error("Autocomplete-Handler nicht gefunden.");
-    }
-    return handler(ctx);
+    // Unbekanntes Autocomplete → leere Liste zurück
+    return ctx.respond([]);
   }
 
-  // Fallback – nichts zu tun
-  return ctx.reply({ content: "❌ Unsupported interaction type.", flags: 64 });
+  // ---- Application Command (Slash) bleibt wie gehabt ----
+  if (t === 2) {
+    // Wir laden dein Command dynamisch wie zuvor – KEINE Repo-Änderungen nötig.
+    const name = body?.data?.name;
+    try {
+      const mod = await import(`./commands/${name}.mjs`);
+      const fn = mod?.default?.run ?? mod?.run;
+      if (typeof fn !== "function") {
+        throw new Error(`Command "${name}" hat keine run()-Funktion.`);
+      }
+      return await fn(ctx);
+    } catch (e) {
+      console.error("[INT] Command load/exec error:", e);
+      return ctx.reply("❌ Interner Fehler.", { ephemeral: true });
+    }
+  }
+
+  // ---- Komponenten (Buttons / Selects) unverändert weiterleiten ----
+  if (t === 3) {
+    const cid = body?.data?.custom_id ?? "";
+    try {
+      // Beispiel: "vote:grund:<payload>" → wir mappen auf ./interactions/components/<prefix>.mjs
+      const prefix = String(cid).split(":")[0]; // z.B. "vote"
+      const mod = await import(`./interactions/components/${prefix}.mjs`);
+      const fn =
+        mod?.default?.handle ?? mod?.handle ??
+        mod?.default?.run ?? mod?.run;
+      if (typeof fn !== "function") {
+        throw new Error(`Component "${prefix}" hat keinen Handler.`);
+      }
+      return await fn(ctx);
+    } catch (e) {
+      console.error("[INT] Component load/exec error:", e);
+      return ctx.reply("❌ Interner Fehler.", { ephemeral: true });
+    }
+  }
+
+  // Fallback
+  return ctx.reply("❌ Unbekannte Interaktion.", { ephemeral: true });
 }
