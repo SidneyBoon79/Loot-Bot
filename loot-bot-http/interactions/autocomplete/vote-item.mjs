@@ -1,8 +1,8 @@
-// interactions/autocomplete/vote-item.mjs — FINAL v3
+// interactions/autocomplete/vote-item.mjs – FINAL
 // Lädt /app/data/items.json (relativ zu process.cwd()) und liefert bis zu 25 Choices.
 
-import fs from 'fs';
-import path from 'path';
+import fs from "fs";
+import path from "path";
 
 // Einmaliger Lazy-Cache
 let CATALOG = null;
@@ -10,14 +10,14 @@ let CATALOG = null;
 function loadCatalog() {
   if (CATALOG) return CATALOG;
   try {
-    const p = path.resolve(process.cwd(), 'data', 'items.json');
-    const raw = fs.readFileSync(p, 'utf8');
+    const p = path.resolve(process.cwd(), "data", "items.json");
+    const raw = fs.readFileSync(p, "utf8");
     const json = JSON.parse(raw);
     CATALOG = (Array.isArray(json) ? json : [])
-      .map(x => (typeof x === 'string' ? x : (x && typeof x.name === 'string') ? x.name : null))
+      .map(x => (typeof x === "string" ? x : (x && typeof x.name === "string") ? x.name : null))
       .filter(Boolean);
   } catch (e) {
-    console.error('[autocomplete/vote-item] items.json laden fehlgeschlagen:', e);
+    console.error("[autocomplete/vote-item] items.json laden fehlgeschlagen:", e);
     CATALOG = [];
   }
   return CATALOG;
@@ -26,6 +26,7 @@ function loadCatalog() {
 function search(q) {
   const items = loadCatalog();
   if (!q) return items.slice(0, 25);
+
   const s = String(q).toLowerCase();
 
   const starts = [];
@@ -39,11 +40,11 @@ function search(q) {
   return [...starts, ...contains].slice(0, 25);
 }
 
-// Fallback: direkt aus der Interaction lesen, falls ctx.getFocusedOptionValue fehlt
+// Fallback: direkt aus der Interaction lesen
 function getFocused(ctx) {
   try {
-    if (typeof ctx.getFocusedOptionValue === 'function') return ctx.getFocusedOptionValue();
-    const opts = ctx?.interaction?.data?.options || [];
+    if (typeof ctx.getFocusedOptionValue === "function") return ctx.getFocusedOptionValue();
+    const opts = ctx?.body?.data?.options || [];
     const f = Array.isArray(opts) ? opts.find(o => o?.focused) : null;
     return f?.value ?? null;
   } catch {
@@ -51,16 +52,22 @@ function getFocused(ctx) {
   }
 }
 
-export async function handleVoteItemAutocomplete(ctx) {
+export default async function handleVoteItemAutocomplete(ctx) {
   try {
     const q = getFocused(ctx);
     const results = search(q);
     const choices = results.map(name => ({ name, value: name })).slice(0, 25);
-    return ctx.respond(choices);
+
+    // WICHTIG: Autocomplete muss type: 8 + { choices } antworten
+    return ctx.respond({
+      type: 8,
+      data: { choices },
+    });
   } catch (e) {
-    console.error('[autocomplete/vote-item] handler error:', e);
-    return ctx.respond([]);
+    console.error("[autocomplete/vote-item] handler error:", e);
+    return ctx.respond({
+      type: 8,
+      data: { choices: [] },
+    });
   }
 }
-
-export default { handleVoteItemAutocomplete };
