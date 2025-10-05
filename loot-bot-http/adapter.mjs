@@ -58,10 +58,34 @@ function wrapMessage(payload, opts = {}) {
   return payload;
 }
 
+/* --------- options helper: robustes Auslesen von Slash-Options ---------- */
+
+function getOptionString(data, name) {
+  if (!data) return null;
+
+  // Wir laufen alle Ebenen (Subcommand / -Groups) ab
+  const stack = [data];
+  while (stack.length) {
+    const node = stack.pop();
+    const opts = Array.isArray(node?.options) ? node.options : [];
+
+    for (const opt of opts) {
+      if (opt?.name === name && typeof opt?.value !== "undefined") {
+        return String(opt.value);
+      }
+      // 1 = SUB_COMMAND, 2 = SUB_COMMAND_GROUP
+      if (opt?.type === 1 || opt?.type === 2) {
+        stack.push(opt);
+      }
+    }
+  }
+  return null;
+}
+
 /* -------------------------------- context ------------------------------- */
 
 export function makeCtx(interaction, res) {
-  return {
+  const ctx = {
     interaction,
     res,
 
@@ -90,7 +114,20 @@ export function makeCtx(interaction, res) {
       const focused = Array.isArray(opts) ? opts.find((o) => o?.focused) : null;
       return focused?.value ?? null;
     },
+
+    // Slash-Options (für vote.mjs: ctx.opts.getString("item"))
+    opts: {
+      getString(name) {
+        try {
+          return getOptionString(interaction?.data, name);
+        } catch {
+          return null;
+        }
+      },
+    },
   };
+
+  return ctx;
 }
 
 /* ------------------------------- routing -------------------------------- */
@@ -116,11 +153,8 @@ async function handleAutocomplete(ctx) {
 
   // Mapping ohne andere Dateien anzufassen:
   // /vote item  -> ./interactions/autocomplete/vote-item.mjs :: handleVoteItemAutocomplete
-  // (weitere Fälle kannst du hier ergänzen, falls nötig)
   if (cmd === "vote" && focusedOpt === "item") {
-    const mod = await requireMod(
-      "./interactions/autocomplete/vote-item.mjs"
-    );
+    const mod = await requireMod("./interactions/autocomplete/vote-item.mjs");
     const handler = pickHandler(mod, "handleVoteItemAutocomplete");
     if (typeof handler !== "function") {
       throw new Error("Autocomplete-Handler nicht gefunden.");
