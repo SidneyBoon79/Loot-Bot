@@ -58,32 +58,54 @@ function wrapMessage(payload, opts = {}) {
   return payload;
 }
 
-/* -------------------------- option helpers (ctx.opts) ------------------- */
+/* ----------------------- Slash-Optionen aufbereiten --------------------- */
 
-function makeOpts(interaction) {
-  const options = Array.isArray(interaction?.data?.options)
-    ? interaction.data.options
-    : [];
+function flattenSlashOptions(data) {
+  let opts = Array.isArray(data?.options) ? data.options : [];
 
-  const find = (name) => options.find((o) => o?.name === name) || null;
+  // Subcommand / SubcommandGroup → eigentliche Optionen liegen tiefer
+  if (opts.length === 1 && Array.isArray(opts[0]?.options)) {
+    opts = opts[0].options;
+  }
+  return opts;
+}
+
+function buildOptsFacade(interaction) {
+  const opts = flattenSlashOptions(interaction?.data);
+
+  const get = (name) => opts.find((o) => o?.name === name)?.value ?? null;
 
   return {
-    get(name) {
-      return find(name)?.value ?? null;
-    },
+    get,
     getString(name) {
-      const v = find(name)?.value;
-      return v == null ? null : String(v);
+      const v = get(name);
+      return typeof v === "string" ? v : (v == null ? null : String(v));
+    },
+    getInteger(name) {
+      const v = get(name);
+      return Number.isInteger(v) ? v : (v == null ? null : parseInt(v, 10));
     },
     getNumber(name) {
-      const v = find(name)?.value;
-      return typeof v === "number" ? v : v == null ? null : Number(v);
+      const v = get(name);
+      const n = Number(v);
+      return Number.isNaN(n) ? null : n;
     },
     getBoolean(name) {
-      const v = find(name)?.value;
-      return typeof v === "boolean" ? v : null;
+      const v = get(name);
+      return typeof v === "boolean" ? v : (v == null ? null : Boolean(v));
     },
-    raw: options,
+    getUser(name) {
+      const v = get(name);
+      return v ?? null;
+    },
+    getChannel(name) {
+      const v = get(name);
+      return v ?? null;
+    },
+    getRole(name) {
+      const v = get(name);
+      return v ?? null;
+    },
   };
 }
 
@@ -106,9 +128,10 @@ export function makeCtx(interaction, res) {
       return res.json({ type: 8, data: { choices: safe } });
     },
 
-    // optionales FollowUp (nicht zwingend gebraucht)
+    // für Komponenten optionales FollowUp (falls du’s brauchst)
     async followUp(payload, opts) {
       const body = wrapMessage(payload, opts);
+      // Interaction Callback 4 ist ausreichend – wir nutzen hier kein Webhook
       return res.json(body);
     },
 
@@ -119,8 +142,8 @@ export function makeCtx(interaction, res) {
       return focused?.value ?? null;
     },
 
-    // <<< WICHTIG: damit /vote wieder funktioniert >>>
-    opts: makeOpts(interaction),
+    // >>> Das war der fehlende Teil: Slash-Options-Facade wie zuvor genutzt
+    opts: buildOptsFacade(interaction),
   };
 }
 
@@ -164,6 +187,7 @@ async function loadComponentModule(base) {
   try {
     return await requireMod(`./interactions/components/${base}.mjs`);
   } catch (e) {
+    // nur bei "Modul nicht gefunden" auf index.fallen
     if (String(e?.code) !== "ERR_MODULE_NOT_FOUND") throw e;
   }
   // 2) Fallback: ./interactions/components/index.mjs
@@ -171,11 +195,15 @@ async function loadComponentModule(base) {
 }
 
 async function handleComponent(ctx) {
+  // Wir leiten anhand der custom_id weiter.
+  // Beispiel: "vote:grund:<…>" -> bevorzugt ./interactions/components/vote.mjs
+  // Wenn es das nicht gibt, fällt es auf ./interactions/components/index.mjs zurück.
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "component";
 
   const mod = await loadComponentModule(base);
 
+  // Benamte Kandidaten der Handler in Components
   const candidates = [
     "handle",
     "run",
@@ -195,6 +223,7 @@ async function handleComponent(ctx) {
     throw new Error(`Component-Handler nicht gefunden (${base}).`);
   }
 
+  // Fürs Modul: customIdParts mitgeben ist oft hilfreich
   ctx.customIdParts = cid.split(":");
   return await handler(ctx);
 }
@@ -203,6 +232,7 @@ async function handleModal(ctx) {
   const cid = String(ctx.interaction?.data?.custom_id || "");
   const base = cid.split(":")[0] || "modal";
 
+  // analog zu Components ebenfalls mit Fallback auf index.mjs
   let mod;
   try {
     mod = await requireMod(`./interactions/modals/${base}.mjs`);
@@ -227,10 +257,24 @@ async function handleModal(ctx) {
 export async function routeInteraction(ctx) {
   const t = ctx.interaction?.type;
 
-  if (t === 2) return await handleCommand(ctx);      // Slash-Command
-  if (t === 4) return await handleAutocomplete(ctx); // Autocomplete
-  if (t === 3) return await handleComponent(ctx);    // Components
-  if (t === 5) return await handleModal(ctx);        // Modals
+  // 1 = PING wird in server/index.mjs bereits beantwortet.
+  if (t === 2) {
+    // Slash-Command
+    return await handleCommand(ctx);
+  }
+  if (t === 4) {
+    // Autocomplete
+    return await handleAutocomplete(ctx);
+  }
+  if (t === 3) {
+    // Message Component (Buttons / String Select)
+    return await handleComponent(ctx);
+  }
+  if (t === 5) {
+    // Modal Submit
+    return await handleModal(ctx);
+  }
 
+  // Unbekannt -> Notfallantwort, verhindert Discord-Timeout
   return ctx.reply("❔ Nicht unterstützte Interaktion.", { ephemeral: true });
 }
